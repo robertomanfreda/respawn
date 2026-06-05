@@ -1,0 +1,14 @@
+.git
+.gitignore
+.dockerignore
+
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+**/*.db
+
+infra/docker/env
+dist
+build
+*.egg-info

@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 3s
+
+scrape_configs:
+  - job_name: respawn
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - respawn:8080
+        labels:
+          service: respawn
+          stack: local
+
+  - job_name: victoria-metrics
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - victoria-metrics:8428
+        labels:
+          service: victoria-metrics
+          stack: local
+
+  - job_name: grafana
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - grafana:3000
+        labels:
+          service: grafana
+          stack: local

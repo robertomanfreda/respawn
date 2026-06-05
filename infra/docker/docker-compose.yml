@@ -1,0 +1,130 @@
+services:
+  respawn:
+    build:
+      context: ../..
+      dockerfile: apps/gateway/Dockerfile
+    env_file:
+      - env.example
+      - path: env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://respawn:respawn@postgres:5432/respawn
+      MODEL_BACKEND: ${MODEL_BACKEND:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-oss:120b}
+      AUTO_CREATE_TABLES: "false"
+    ports:
+      - "8080:8080"
+    depends_on:
+      ollama-preload:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
+    ports:
+      - "11434:11434"
+    volumes:
+      - ${OLLAMA_MODELS_PATH:-ollama-data}:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "OLLAMA_HOST=http://127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama-preload:
+    image: curlimages/curl:latest
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_PRELOAD_MODEL: ${DEFAULT_MODEL:-gpt-oss:120b}
+      OLLAMA_PRELOAD_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+
+        keep_alive="$$OLLAMA_PRELOAD_KEEP_ALIVE"
+        if printf '%s' "$$keep_alive" | grep -Eq '^-?[0-9]+$$'; then
+          keep_alive_json="$$keep_alive"
+        else
+          escaped_keep_alive=$$(printf '%s' "$$keep_alive" | sed 's/\\/\\\\/g; s/"/\\"/g')
+          keep_alive_json="\"$$escaped_keep_alive\""
+        fi
+
+        escaped_model=$$(printf '%s' "$$OLLAMA_PRELOAD_MODEL" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        payload=$$(printf '{"model":"%s","prompt":"","keep_alive":%s}' "$$escaped_model" "$$keep_alive_json")
+
+        echo "Preloading Ollama model $$OLLAMA_PRELOAD_MODEL with keep_alive=$$keep_alive..."
+        curl -fsS "$$OLLAMA_URL/api/generate" \
+          -H "Content-Type: application/json" \
+          -d "$$payload" >/dev/null
+        echo "Ollama model $$OLLAMA_PRELOAD_MODEL is loaded."
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: respawn
+      POSTGRES_PASSWORD: respawn
+      POSTGRES_DB: respawn
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U respawn"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:latest
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -retentionPeriod=${VICTORIA_RETENTION_PERIOD:-1}
+      - -promscrape.config=/etc/victoria/promscrape.yml
+    ports:
+      - "${VICTORIA_METRICS_PORT:-8428}:8428"
+    volumes:
+      - victoria-metrics-data:/victoria-metrics-data
+      - ./observability/victoria/promscrape.yml:/etc/victoria/promscrape.yml:ro
+    depends_on:
+      respawn:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-respawn}
+      GF_USERS_DEFAULT_THEME: dark
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_METRICS_ENABLED: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      victoria-metrics:
+        condition: service_started
+
+volumes:
+  ollama-data:
+  victoria-metrics-data:
+  grafana-data:

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Respawn">
+  <defs>
+    <linearGradient id="respawn-arrow" x1="17" y1="48" x2="55" y2="13" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff7a3d"/>
+      <stop offset="1" stop-color="#f0442f"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="#0b0f14"/>
+  <path fill="url(#respawn-arrow)" d="M26 49C19 44 16 35 19 26C23 16 34 11 43 13V7L56 18L43 30V23C37 21 30 24 26 30C22 36 23 44 26 49Z"/>
+</svg>
