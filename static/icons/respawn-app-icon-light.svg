@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Respawn app icon light</title>
+  <desc id="desc">A clean single circular respawn arrow on a light rounded square.</desc>
+  <defs>
+    <linearGradient id="respawn-arrow" x1="68" y1="190" x2="217" y2="53" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff7a3d"/>
+      <stop offset="1" stop-color="#f0442f"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="#f8fafc"/>
+  <path fill="url(#respawn-arrow)" d="M105 194C76 174 63 137 77 103C93 64 134 42 173 51V27L222 72L173 118V91C146 84 118 96 103 121C88 145 91 175 105 194Z"/>
+</svg>

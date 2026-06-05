@@ -23,9 +23,13 @@ jobs belong to Ollama and the model runtime underneath it.
 - Structured-output JSON Schema validation with one repair attempt.
 - API-key authentication with tenant-scoped stored responses.
 - OpenAI-shaped errors.
-- Prometheus metrics and structured JSON logging.
-- Docker Compose stack for Respawn, Postgres, and Ollama.
-- Deterministic mock backend for local development and CI.
+- Prometheus-compatible metrics and structured JSON logging.
+- Docker Compose stack for Respawn, Postgres, Ollama, VictoriaMetrics, and Grafana.
+- Deterministic mock backend for tests and smoke checks.
+
+## Observability Preview
+
+![Respawn Grafana dashboard showing model gateway metrics](docs/grafana-respawn-image.png)
 
 ## Repository Layout
 
@@ -47,14 +51,22 @@ apps/gateway/
   pyproject.toml
 
 infra/docker/
-  docker-compose.yml     Respawn + Postgres + Ollama
+  docker-compose.yml     Respawn + Postgres + Ollama + observability
   env.example            Safe defaults for the Compose stack
+  observability/
+    victoria/            VictoriaMetrics scrape config
+    grafana/             Provisioned datasource and dashboard
 ```
 
 ## Quick Start
 
-The fastest local path uses the mock backend and SQLite. It does not require
-Docker or a running model server.
+The default local path uses Ollama and SQLite. Start Ollama locally before
+running the gateway:
+
+```bash
+ollama serve
+ollama pull gpt-oss:120b
+```
 
 ```bash
 cd apps/gateway
@@ -75,7 +87,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-oss-120b",
+    model="gpt-oss:120b",
     input="Ciao, spiegami Kubernetes in una frase.",
 )
 
@@ -84,10 +96,16 @@ print(response.output_text)
 
 By default, the local Python process uses:
 
-- `MODEL_BACKEND=mock`
+- `MODEL_BACKEND=ollama`
 - `AUTH_DISABLED=true`
 - `DATABASE_URL=sqlite+aiosqlite:///./gateway.db`
 - `AUTO_CREATE_TABLES=true`
+
+For a no-model smoke test, run the gateway with the deterministic mock backend:
+
+```bash
+MODEL_BACKEND=mock DEFAULT_MODEL=gpt-oss-120b uvicorn src.main:app --host 0.0.0.0 --port 8080
+```
 
 ## Docker And Ollama
 
@@ -96,23 +114,45 @@ The Compose stack starts:
 - `respawn`, the FastAPI gateway
 - `postgres`, the persistence layer
 - `ollama`, the local model server
+- `ollama-preload`, a one-shot setup job that loads `DEFAULT_MODEL`
+- `victoria-metrics`, the Prometheus-compatible metrics store
+- `grafana`, the dashboard UI
 
 Run it from the Compose directory:
 
 ```bash
 cd infra/docker
-cp env.example env
-docker compose --env-file env up --build
+make env
+make up-build
 ```
 
 Useful checks:
 
 ```bash
-curl -s http://localhost:8080/healthz
-curl -s http://localhost:8080/readyz
+make health
+make ready
 curl -s http://localhost:8080/v1/models
-curl -s http://localhost:8080/metrics
+make metrics
+curl -s http://localhost:8428/metrics
 ```
+
+Grafana runs at:
+
+```text
+http://localhost:3000
+```
+
+Default local login:
+
+```text
+admin / respawn
+```
+
+Open the `Respawn / Respawn Model Gateway` dashboard after generating a few API
+requests. It shows HTTP throughput, 5xx ratio, in-flight Responses requests,
+response latency, token throughput, input/output token split, output tokens per
+completed response, Ollama native prefill and decode tokens/sec, Ollama backend
+calls, backend latency, route traffic, tool executions, and gateway errors.
 
 If you already have Ollama models on the host, set `OLLAMA_MODELS_PATH` in
 `infra/docker/env` before starting Compose:
@@ -133,6 +173,47 @@ and pull the model inside the Ollama container:
 docker compose --env-file env exec ollama ollama pull gpt-oss:120b
 ```
 
+On startup, Compose runs a one-shot preload request:
+
+```json
+{"model":"gpt-oss:120b","prompt":"","keep_alive":-1}
+```
+
+Set `OLLAMA_KEEP_ALIVE=24h` or another Ollama-supported value in
+`infra/docker/env` if you prefer the model to unload after an idle window.
+
+## Docker Makefile
+
+The Docker helper Makefile wraps the Compose flags and uses `infra/docker/env`
+when it exists, otherwise `env.example`.
+
+```bash
+cd infra/docker
+make help
+make up
+make ps
+make logs-respawn
+make models
+make benchmark
+```
+
+`make benchmark` runs a separate Compose service from
+`docker-compose.benchmark.yml`. The benchmark calls Respawn over HTTP, measures
+latency for core request paths, and exercises the current Responses, Chat
+Completions, tools, streaming, persistence, structured-output, prompt-cache,
+reasoning, models, health, and metrics features. Reports are written under
+`infra/docker/benchmark-results/`.
+
+## Responses Compatibility
+
+Respawn tracks its current OpenAI Responses compatibility in
+[`docs/RESPONSES_COMPATIBILITY.md`](docs/RESPONSES_COMPATIBILITY.md). Unsupported
+Responses fields should fail explicitly with OpenAI-shaped errors instead of
+being silently ignored. Larger gaps and roadmap items live in
+[`docs/FUTURE_WORK.md`](docs/FUTURE_WORK.md). The exploratory comparison in
+[`docs/OLLAMA_GAP_PROBE.md`](docs/OLLAMA_GAP_PROBE.md) documents what Respawn adds on top
+of Ollama's direct API surface.
+
 The local `infra/docker/env` file is ignored by Git. Keep publishable defaults in
 `infra/docker/env.example`.
 
@@ -146,9 +227,9 @@ defaults:
 | `APP_HOST` | `0.0.0.0` | Uvicorn bind host. |
 | `APP_PORT` | `8080` | Uvicorn bind port. |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./gateway.db` | Use Postgres for Compose and production-like runs. |
-| `MODEL_BACKEND` | `mock` | Supported values: `mock`, `ollama`. |
+| `MODEL_BACKEND` | `ollama` | Supported values: `mock`, `ollama`. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible base URL. |
-| `DEFAULT_MODEL` | `gpt-oss-120b` | Used when requests omit `model`. |
+| `DEFAULT_MODEL` | `gpt-oss:120b` | Used when requests omit `model`. |
 | `AUTH_DISABLED` | `true` | Disable bearer-token checks for local development. |
 | `LOCAL_OPENAI_API_KEYS` | `local-dev-key:tenant-local` | Comma-separated `key:tenant` mappings. |
 | `STORE_DEFAULT` | `true` | Default for Responses `store` when omitted. |
@@ -158,7 +239,23 @@ defaults:
 | `BACKEND_TIMEOUT_SECONDS` | `120` | Timeout for model backend HTTP calls. |
 | `STREAM_HEARTBEAT_SECONDS` | `15` | Reserved heartbeat cadence for streaming paths. |
 | `MAX_OUTPUT_TOKENS_DEFAULT` | `2048` | Default chat-completions `max_tokens`. |
+| `PROMPT_CACHE_ENABLED` | `true` | Enables local prompt prefix cache accounting. |
+| `PROMPT_CACHE_MIN_TOKENS` | `1024` | Minimum prompt-surface tokens before a cache hit is counted. |
+| `PROMPT_CACHE_MAX_ENTRIES` | `256` | Maximum in-process prompt prefix entries. |
+| `PROMPT_CACHE_IN_MEMORY_TTL_SECONDS` | `3600` | TTL for `prompt_cache_retention=in_memory`. |
+| `PROMPT_CACHE_EXTENDED_TTL_SECONDS` | `86400` | TTL for `prompt_cache_retention=24h`. |
+| `PROMPT_CACHE_CHUNK_TOKENS` | `128` | Prefix-cache accounting granularity. |
 | `AUTO_CREATE_TABLES` | `true` | Local shortcut. Use Alembic in container and production-like paths. |
+
+Compose-only observability settings:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `VICTORIA_METRICS_PORT` | `8428` | Host port for VictoriaMetrics. |
+| `VICTORIA_RETENTION_PERIOD` | `1` | Retention period in months. |
+| `GRAFANA_PORT` | `3000` | Host port for Grafana. |
+| `GRAFANA_ADMIN_USER` | `admin` | Local Grafana admin username. |
+| `GRAFANA_ADMIN_PASSWORD` | `respawn` | Local Grafana admin password. |
 
 The Docker stack overrides a few values so the containers talk to each other:
 
@@ -176,6 +273,8 @@ Respawn currently exposes:
 
 - `POST /v1/responses`
 - `GET /v1/responses/{response_id}`
+- `GET /v1/responses/{response_id}/input_items`
+- `POST /v1/responses/input_tokens`
 - `DELETE /v1/responses/{response_id}`
 - `POST /v1/chat/completions`
 - `GET /v1/models`
@@ -188,7 +287,7 @@ Respawn currently exposes:
 
 ```json
 {
-  "model": "gpt-oss-120b",
+  "model": "gpt-oss:120b",
   "input": "string or list of input items",
   "instructions": "optional system/developer instructions",
   "previous_response_id": "resp_...",
@@ -199,11 +298,27 @@ Respawn currently exposes:
   "max_output_tokens": 1024,
   "tools": [],
   "tool_choice": "auto",
+  "reasoning": {"effort": "low", "summary": "auto"},
+  "prompt_cache_key": "tenant-or-workload",
+  "prompt_cache_retention": "in_memory",
   "response_format": {},
   "text": {"format": {}},
   "metadata": {}
 }
 ```
+
+## Prompt Cache And Reasoning
+
+Respawn supports local prompt-cache accounting for Responses. The cache stores
+hashes of prompt prefixes in the gateway process and reports cache hits through
+`usage.input_tokens_details.cached_tokens`. This mirrors the Responses usage
+shape, but it does not reuse backend KV tensors or skip model prefill.
+
+For reasoning requests, Respawn maps `reasoning.effort` to Ollama `think` when
+the Ollama backend is active. If the backend returns `message.thinking`, Respawn
+tracks `usage.output_tokens_details.reasoning_tokens` and returns a
+`type=reasoning` output item. Summary text is high-level local metadata and does
+not expose raw chain-of-thought.
 
 Responses use OpenAI-style object shapes and IDs:
 
@@ -284,11 +399,18 @@ Respawn includes:
 - Structured JSON logging.
 - Request IDs through `x-request-id`.
 - Request latency metrics.
+- Responses metrics by model, mode, status, and storage behavior.
+- In-flight Responses gauge.
 - Backend latency metrics.
+- Backend request counters by backend, operation, and status.
 - Token usage metrics.
+- Ollama native prefill and decode throughput metrics from `prompt_eval_*` and
+  `eval_*` timings.
 - Tool execution metrics.
 - Error counters.
 - `/metrics` Prometheus endpoint.
+- A Compose-managed VictoriaMetrics scraper.
+- A provisioned Grafana datasource and `Respawn Model Gateway` dashboard.
 
 Logs avoid API keys and full request payloads.
 

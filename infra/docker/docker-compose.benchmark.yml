@@ -1,0 +1,26 @@
+services:
+  respawn-benchmark:
+    image: python:3.12-slim
+    profiles:
+      - benchmark
+    working_dir: /benchmark
+    user: "${RESPAWN_BENCHMARK_UID:-1000}:${RESPAWN_BENCHMARK_GID:-1000}"
+    environment:
+      RESPAWN_BASE_URL: ${RESPAWN_BENCHMARK_BASE_URL:-http://respawn:8080}
+      RESPAWN_API_KEY: ${RESPAWN_BENCHMARK_API_KEY:-local-dev-key}
+      RESPAWN_BENCHMARK_MODEL: ${RESPAWN_BENCHMARK_MODEL:-gpt-oss:120b}
+      RESPAWN_BENCHMARK_RUNS: ${RESPAWN_BENCHMARK_RUNS:-3}
+      RESPAWN_BENCHMARK_TIMEOUT_SECONDS: ${RESPAWN_BENCHMARK_TIMEOUT_SECONDS:-180}
+      RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS: ${RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS:-64}
+      RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS: ${RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS:-true}
+      RESPAWN_BENCHMARK_OUTPUT: ${RESPAWN_BENCHMARK_OUTPUT:-/results/respawn-benchmark.json}
+    command:
+      - python
+      - /benchmark/respawn_benchmark.py
+    volumes:
+      - ./benchmark:/benchmark:ro
+      - ./benchmark-results:/results
+    depends_on:
+      respawn:
+        condition: service_started
+    restart: "no"
