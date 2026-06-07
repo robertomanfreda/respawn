@@ -34,6 +34,7 @@ async def test_ollama_non_streaming_payload_and_usage_mapping():
         payload = json.loads(request.content)
         assert payload["model"] == "gpt-oss:120b"
         assert payload["stream"] is False
+        assert payload["think"] is False
         assert payload["options"]["num_predict"] == 8
         return httpx.Response(
             200,
@@ -146,6 +147,40 @@ async def test_ollama_tool_call_messages_are_mapped_to_native_arguments():
 
     assert result.content == "4"
     assert result.usage == {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+
+
+@pytest.mark.asyncio
+async def test_ollama_multimodal_message_maps_images_and_file_text():
+    image_base64 = "iVBORw0KGgo="
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        message = payload["messages"][0]
+        assert message["images"] == [image_base64]
+        assert "[Image input]" not in message["content"]
+        assert "describe" in message["content"]
+        assert "[File: facts.txt]" in message["content"]
+        assert "marker word is cobalt" in message["content"]
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": "ok"}, "prompt_eval_count": 3, "eval_count": 1})
+
+    adapter = OllamaBackend("http://ollama.test/v1", 10, transport=httpx.MockTransport(handler))
+    result = await adapter.create_chat_completion(
+        {
+            "model": "moondream:latest",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_base64": image_base64, "mime_type": "image/png"},
+                        {"type": "input_file", "filename": "facts.txt", "text": "marker word is cobalt"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result.content == "ok"
 
 
 @pytest.mark.asyncio

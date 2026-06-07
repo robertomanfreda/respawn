@@ -7,11 +7,13 @@ it short, practical, and current.
 
 Respawn is a local OpenAI-compatible gateway focused on the Responses API. The
 runtime default is Ollama, while the deterministic mock backend is used for fast
-tests and smoke checks.
+tests and smoke checks. The current architecture is single-instance and
+single-backend: one Respawn process is expected to talk to one configured model
+backend.
 
 Main areas:
 
-- `apps/gateway`: FastAPI gateway, adapters, schemas, storage, tools, tests.
+- `apps/gateway`: FastAPI gateway, adapters, schemas, storage, and tests.
 - `infra/docker`: local Compose stack for Respawn, Postgres, Ollama,
   VictoriaMetrics, Grafana, and benchmark runners.
 
@@ -68,15 +70,23 @@ suite. Whenever Respawn gains, removes, or changes a user-visible feature, updat
 
 Respawn currently supports a practical subset of the OpenAI Responses API:
 blocking and streaming text responses, response retrieval/deletion, input item
-listing, input token counting, previous response state, structured outputs,
-local prompt-cache accounting, local reasoning items, local function tools, chat
-completions, models, auth, metrics, and persistence.
+listing, input token counting, Responses-native `previous_response_id` state,
+structured outputs, local prompt-cache accounting, local reasoning items,
+Responses function tool calling protocol compatibility without local tool
+execution, chat completions, models, auth, metrics, and persistence. It does not
+target the OpenAI Conversations API.
 
 When expanding Responses compatibility:
 
 - Preserve the OpenAI-shaped request and response surface where possible.
+- Keep the implementation scoped to one Respawn instance and one configured
+  backend; do not add multi-deployment, distributed cache, backend routing, or
+  external-worker assumptions.
 - Prefer explicit `400`/`422` style errors for unsupported fields over accepting
   fields that do nothing.
+- Treat function tools as protocol data only. Do not add filesystem, shell, git,
+  `apply_patch`, workspace, MCP-hosting, or other local tool execution inside
+  Respawn.
 - Keep the support matrix in [`RESPONSES_COMPATIBILITY.md`](RESPONSES_COMPATIBILITY.md) accurate.
 - Keep major gaps and roadmap notes in [`FUTURE_WORK.md`](FUTURE_WORK.md).
 - Add focused tests under `apps/gateway/tests`.

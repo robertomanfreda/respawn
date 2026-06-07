@@ -10,17 +10,21 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8080
     database_url: str = "sqlite+aiosqlite:///./gateway.db"
-    redis_url: str | None = None
     model_backend: str = "ollama"
     ollama_base_url: str = "http://localhost:11434/v1"
     default_model: str = "gpt-oss:120b"
+    vision_model: str = "moondream:latest"
+    model_capabilities: str = "gpt-oss:120b=text,file-text,reasoning,tools;gpt-oss-120b=text,file-text,reasoning,tools;moondream:latest=text,file-text,vision"
+    multimodal_download_timeout_seconds: float = 10.0
+    multimodal_max_image_bytes: int = 5_000_000
+    multimodal_max_file_bytes: int = 2_000_000
     auth_disabled: bool = True
     local_openai_api_keys: str = "local-dev-key:tenant-local"
     store_default: bool = True
     max_chain_depth: int = 50
-    max_tool_iterations: int = 8
-    tool_timeout_seconds: float = 15.0
     backend_timeout_seconds: float = 120.0
+    background_job_timeout_seconds: float = 300.0
+    background_job_heartbeat_seconds: float = 1.0
     stream_heartbeat_seconds: float = 15.0
     max_output_tokens_default: int = 2048
     prompt_cache_enabled: bool = True

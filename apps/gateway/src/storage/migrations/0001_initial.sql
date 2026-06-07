@@ -22,8 +22,27 @@ CREATE TABLE response_items (
   role TEXT NULL,
   content_json JSONB NOT NULL,
   status TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  input_index INT NULL,
+  output_index INT NULL,
+  call_id TEXT NULL,
+  name TEXT NULL,
+  arguments_json JSONB NULL,
+  output_json JSONB NULL,
+  summary_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ NULL,
+  CONSTRAINT uq_response_items_input_index UNIQUE (response_id, input_index),
+  CONSTRAINT uq_response_items_output_index UNIQUE (response_id, output_index)
 );
+
+CREATE INDEX ix_response_items_response_input
+  ON response_items(response_id, input_index);
+
+CREATE INDEX ix_response_items_response_output
+  ON response_items(response_id, output_index);
+
+CREATE INDEX ix_response_items_response_call
+  ON response_items(response_id, call_id);
 
 CREATE TABLE tool_calls (
   id TEXT PRIMARY KEY,
@@ -34,6 +53,20 @@ CREATE TABLE tool_calls (
   status TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ NULL
+);
+
+CREATE TABLE background_jobs (
+  id TEXT PRIMARY KEY,
+  response_id TEXT NOT NULL UNIQUE REFERENCES responses(id),
+  status TEXT NOT NULL,
+  attempts INT NOT NULL DEFAULT 0,
+  timeout_at TIMESTAMPTZ NULL,
+  started_at TIMESTAMPTZ NULL,
+  heartbeat_at TIMESTAMPTZ NULL,
+  cancellation_requested_at TIMESTAMPTZ NULL,
+  completed_at TIMESTAMPTZ NULL,
+  error_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE usage_records (

@@ -2,8 +2,9 @@ ENV_FILE ?= $(firstword $(wildcard env) env.example)
 COMPOSE = docker compose --env-file $(ENV_FILE)
 BASE_FILES = -f docker-compose.yml
 BENCHMARK_FILES = -f docker-compose.yml -f docker-compose.benchmark.yml
+BENCHMARK_MOCK_FILES = -f docker-compose.benchmark.mock.yml
 
-.PHONY: help env config up up-build down stop restart ps logs logs-respawn logs-ollama build pull preload models health ready metrics grafana benchmark benchmark-up benchmark-clean
+.PHONY: help env config up up-build down stop restart ps logs logs-respawn logs-ollama build pull preload models health ready metrics grafana benchmark benchmark-mock benchmark-up benchmark-clean
 
 help:
 	@printf "Respawn Docker helpers\n\n"
@@ -16,6 +17,7 @@ help:
 	@printf "  make logs-respawn    Follow Respawn logs\n"
 	@printf "  make logs-ollama     Follow Ollama logs\n"
 	@printf "  make benchmark       Run the benchmark/feature suite\n"
+	@printf "  make benchmark-mock  Run benchmark smoke mode with mock backend\n"
 	@printf "  make benchmark-up    Start stack, then run benchmark\n"
 	@printf "  make models          List Ollama models in the container\n"
 	@printf "  make metrics         Print Respawn metrics\n"
@@ -83,7 +85,13 @@ grafana:
 
 benchmark:
 	@mkdir -p benchmark-results
-	RESPAWN_BENCHMARK_UID=$$(id -u) RESPAWN_BENCHMARK_GID=$$(id -g) $(COMPOSE) $(BENCHMARK_FILES) run --rm respawn-benchmark
+	RESPAWN_BENCHMARK_UID=$$(id -u) RESPAWN_BENCHMARK_GID=$$(id -g) $(COMPOSE) $(BENCHMARK_FILES) up -d --build respawn
+	RESPAWN_BENCHMARK_UID=$$(id -u) RESPAWN_BENCHMARK_GID=$$(id -g) RESPAWN_BENCHMARK_GIT_SHA=$$(git -C ../.. rev-parse --short HEAD 2>/dev/null || true) $(COMPOSE) $(BENCHMARK_FILES) run --rm respawn-benchmark
+
+benchmark-mock:
+	@mkdir -p benchmark-results
+	$(COMPOSE) -p respawn_benchmark_mock $(BENCHMARK_MOCK_FILES) up -d --build respawn
+	RESPAWN_BENCHMARK_UID=$$(id -u) RESPAWN_BENCHMARK_GID=$$(id -g) RESPAWN_BENCHMARK_GIT_SHA=$$(git -C ../.. rev-parse --short HEAD 2>/dev/null || true) $(COMPOSE) -p respawn_benchmark_mock $(BENCHMARK_MOCK_FILES) run --rm respawn-benchmark
 
 benchmark-up: up-build benchmark
 

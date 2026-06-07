@@ -12,6 +12,8 @@ services:
       MODEL_BACKEND: ${MODEL_BACKEND:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-oss:120b}
+      VISION_MODEL: ${VISION_MODEL:-moondream:latest}
+      MODEL_CAPABILITIES: ${MODEL_CAPABILITIES:-gpt-oss:120b=text,file-text,reasoning,tools;moondream:latest=text,file-text,vision}
       AUTO_CREATE_TABLES: "false"
     ports:
       - "8080:8080"
@@ -49,6 +51,7 @@ services:
     environment:
       OLLAMA_URL: http://ollama:11434
       OLLAMA_PRELOAD_MODEL: ${DEFAULT_MODEL:-gpt-oss:120b}
+      OLLAMA_PRELOAD_MODELS: ${OLLAMA_PRELOAD_MODELS:-gpt-oss:120b,moondream:latest}
       OLLAMA_PRELOAD_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
     command:
       - sh
@@ -64,14 +67,36 @@ services:
           keep_alive_json="\"$$escaped_keep_alive\""
         fi
 
-        escaped_model=$$(printf '%s' "$$OLLAMA_PRELOAD_MODEL" | sed 's/\\/\\\\/g; s/"/\\"/g')
-        payload=$$(printf '{"model":"%s","prompt":"","keep_alive":%s}' "$$escaped_model" "$$keep_alive_json")
+        models="$${OLLAMA_PRELOAD_MODELS:-$$OLLAMA_PRELOAD_MODEL}"
+        old_ifs="$$IFS"
+        IFS=","
+        for model in $$models; do
+          IFS="$$old_ifs"
+          model=$$(printf '%s' "$$model" | sed 's/^ *//; s/ *$$//')
+          if [ -z "$$model" ]; then
+            IFS=","
+            continue
+          fi
+          escaped_model=$$(printf '%s' "$$model" | sed 's/\\/\\\\/g; s/"/\\"/g')
+          payload=$$(printf '{"model":"%s","prompt":"","keep_alive":%s}' "$$escaped_model" "$$keep_alive_json")
+          pull_payload=$$(printf '{"name":"%s","stream":false}' "$$escaped_model")
 
-        echo "Preloading Ollama model $$OLLAMA_PRELOAD_MODEL with keep_alive=$$keep_alive..."
-        curl -fsS "$$OLLAMA_URL/api/generate" \
-          -H "Content-Type: application/json" \
-          -d "$$payload" >/dev/null
-        echo "Ollama model $$OLLAMA_PRELOAD_MODEL is loaded."
+          echo "Preloading Ollama model $$model with keep_alive=$$keep_alive..."
+          if ! curl -fsS "$$OLLAMA_URL/api/generate" \
+            -H "Content-Type: application/json" \
+            -d "$$payload" >/dev/null; then
+            echo "Model $$model is not ready; pulling it from Ollama registry..."
+            curl -fsS "$$OLLAMA_URL/api/pull" \
+              -H "Content-Type: application/json" \
+              -d "$$pull_payload" >/dev/null
+            curl -fsS "$$OLLAMA_URL/api/generate" \
+              -H "Content-Type: application/json" \
+              -d "$$payload" >/dev/null
+          fi
+          echo "Ollama model $$model is loaded."
+          IFS=","
+        done
+        IFS="$$old_ifs"
     depends_on:
       ollama:
         condition: service_healthy

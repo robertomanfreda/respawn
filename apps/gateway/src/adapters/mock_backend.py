@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+import asyncio
 import json
 from typing import Any
 
@@ -20,6 +21,13 @@ class MockBackend(ModelBackend):
         text = _content_to_text(last_user.get("content", ""))
         all_text = " ".join(_content_to_text(m.get("content", "")) for m in messages).lower()
         schema = schema_from_response_format(payload.get("response_format"))
+        max_tokens = payload.get("max_tokens")
+        tool_choice = payload.get("tool_choice")
+
+        if "background timeout" in all_text:
+            await asyncio.sleep(0.25)
+        elif "background slow" in all_text:
+            await asyncio.sleep(0.15)
 
         if schema:
             if "repair failure" in all_text:
@@ -58,9 +66,38 @@ class MockBackend(ModelBackend):
                 usage={"input_tokens": len(str(messages).split()), "output_tokens": 0, "total_tokens": len(str(messages).split())},
             )
 
+        forced_tool_name = None
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            function = tool_choice.get("function") if isinstance(tool_choice.get("function"), dict) else {}
+            forced_tool_name = function.get("name")
+
+        if payload.get("tools") and (tool_choice == "required" or forced_tool_name) and not any(m.get("role") == "tool" for m in messages):
+            tool = next((candidate.get("function", {}) for candidate in payload["tools"] if candidate.get("function", {}).get("name") == forced_tool_name), None)
+            if tool is None:
+                tool = payload["tools"][0].get("function", {})
+            tool_name = tool.get("name", "echo")
+            arguments = '{"expression":"2+2"}' if tool_name == "calculator" else '{"text":"required"}'
+            return ChatCompletionResult(
+                content="",
+                tool_calls=[
+                    {
+                        "id": f"call_mock_{tool_name.replace('.', '_')}",
+                        "type": "function",
+                        "function": {"name": tool_name, "arguments": arguments},
+                    }
+                ],
+                usage={"input_tokens": len(str(messages).split()), "output_tokens": 0, "total_tokens": len(str(messages).split())},
+            )
+
         if any(m.get("role") == "tool" for m in messages):
             tool_text = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "tool"), "")
             text = f"Tool result: {tool_text}"
+        elif _has_image(messages) and any(word in all_text for word in ("color", "describe", "image")):
+            text = "The image contains a red square."
+        elif "previous file marker word" in text.lower() and "cobalt" in all_text:
+            text = "Mock response: cobalt"
+        elif "marker word" in all_text:
+            text = f"Mock response: {text}"
         elif payload.get("tools") and "calculator" in text.lower():
             return ChatCompletionResult(
                 content="",
@@ -77,6 +114,11 @@ class MockBackend(ModelBackend):
         else:
             text = f"Mock response: {text}"
 
+        finish_reason = None
+        if max_tokens == 1:
+            text = text.split()[0] if text.split() else ""
+            finish_reason = "length"
+
         reasoning = ""
         if payload.get("reasoning"):
             reasoning = "The mock backend inspected the prompt and selected a direct response."
@@ -86,24 +128,49 @@ class MockBackend(ModelBackend):
         usage: dict[str, Any] = {"input_tokens": in_tokens, "output_tokens": out_tokens, "total_tokens": in_tokens + out_tokens}
         if reasoning:
             usage["output_tokens_details"] = {"reasoning_tokens": len(reasoning.split())}
-        return ChatCompletionResult(content=text, reasoning=reasoning, usage=usage)
+        return ChatCompletionResult(content=text, reasoning=reasoning, finish_reason=finish_reason, usage=usage)
 
     async def create_chat_completion_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self.create_chat_completion(payload)
         if result.reasoning:
             for token in result.reasoning.split():
                 yield {"type": "reasoning_delta", "delta": token + " "}
+        if result.tool_calls:
+            yield {"type": "tool_calls", "tool_calls": result.tool_calls}
         for token in result.content.split():
             yield {"type": "delta", "delta": token + " "}
-        yield {"type": "done", "usage": result.usage}
+        done = {"type": "done", "usage": result.usage}
+        if result.finish_reason is not None:
+            done["finish_reason"] = result.finish_reason
+        yield done
 
 
 def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(str(part.get("text", part)) for part in content)
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                parts.append(str(part))
+                continue
+            part_type = part.get("type")
+            if part_type == "input_file":
+                parts.append(str(part.get("text", "")))
+            elif part_type == "input_image":
+                parts.append("[image]")
+            else:
+                parts.append(str(part.get("text", part.get("output_text", part))))
+        return " ".join(parts)
     return str(content)
+
+
+def _has_image(messages: list[dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(isinstance(part, dict) and part.get("type") == "input_image" for part in content):
+            return True
+    return False
 
 
 def _usage(messages: list[dict[str, Any]], content: str) -> dict[str, int]:

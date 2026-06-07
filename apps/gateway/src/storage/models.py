@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -36,6 +36,13 @@ class ResponseRecord(Base):
 
 class ResponseItemRecord(Base):
     __tablename__ = "response_items"
+    __table_args__ = (
+        UniqueConstraint("response_id", "input_index", name="uq_response_items_input_index"),
+        UniqueConstraint("response_id", "output_index", name="uq_response_items_output_index"),
+        Index("ix_response_items_response_input", "response_id", "input_index"),
+        Index("ix_response_items_response_output", "response_id", "output_index"),
+        Index("ix_response_items_response_call", "response_id", "call_id"),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     response_id: Mapped[str] = mapped_column(ForeignKey("responses.id"), nullable=False)
@@ -43,7 +50,15 @@ class ResponseItemRecord(Base):
     role: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_json: Mapped[Any] = mapped_column(JsonType, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    input_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    arguments_json: Mapped[Any | None] = mapped_column(JsonType, nullable=True)
+    output_json: Mapped[Any | None] = mapped_column(JsonType, nullable=True)
+    summary_json: Mapped[Any | None] = mapped_column(JsonType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ToolCallRecord(Base):
@@ -57,6 +72,22 @@ class ToolCallRecord(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BackgroundJobRecord(Base):
+    __tablename__ = "background_jobs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    response_id: Mapped[str] = mapped_column(ForeignKey("responses.id"), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    timeout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_json: Mapped[Any | None] = mapped_column(JsonType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class UsageRecord(Base):

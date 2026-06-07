@@ -17,6 +17,7 @@ from src.observability.metrics import (
 )
 from src.schemas.errors import OpenAIError
 from src.schemas.models import ModelList, ModelObject
+from src.services.response_history_builder import content_to_text
 
 NANOSECONDS_PER_SECOND = 1_000_000_000
 
@@ -50,6 +51,7 @@ class OllamaBackend(ModelBackend):
         stream_payload = _ollama_chat_payload(payload, stream=True)
         model = _payload_model(payload)
         usage: dict[str, int] = {}
+        finish_reason: str | None = None
         operation = "chat_completion_stream"
         status = "failed"
         started_at = perf_counter()
@@ -72,18 +74,22 @@ class OllamaBackend(ModelBackend):
                             if _has_native_ollama_usage(data):
                                 usage = _usage(_native_ollama_data(data))
                                 _record_native_ollama_metrics(model, operation, data)
+                            finish_reason = _stream_finish_reason(data) or finish_reason
                             reasoning_delta = _stream_reasoning_delta(data)
                             if reasoning_delta is not None:
                                 yield {"type": "reasoning_delta", "delta": reasoning_delta}
+                            tool_calls = _stream_tool_calls(data)
+                            if tool_calls and payload.get("tools"):
+                                yield {"type": "tool_calls", "tool_calls": tool_calls}
                             delta = _stream_delta(data)
                             if delta is not None:
                                 yield {"type": "delta", "delta": delta}
                             if data.get("done") is True:
                                 status = "completed"
-                                yield {"type": "done", "usage": usage}
+                                yield _done_chunk(usage, finish_reason)
                                 return
                 status = "completed"
-                yield {"type": "done", "usage": usage}
+                yield _done_chunk(usage, finish_reason)
         except httpx.TimeoutException as exc:
             status = "timeout"
             raise OpenAIError("Backend stream timed out.", status_code=504, type="server_error", code="backend_timeout") from exc
@@ -147,9 +153,10 @@ def _chat_completion_result(data: dict[str, Any], *, tools_requested: bool) -> C
     tool_calls = _normalize_tool_calls(message.get("tool_calls") or [])
     content = message.get("content") or ""
     reasoning = message.get("reasoning") or message.get("thinking") or ""
+    finish_reason = choice.get("finish_reason") or data.get("finish_reason")
     if tool_calls and not tools_requested:
-        return ChatCompletionResult(content=_undeclared_tool_call_content(tool_calls, content), reasoning=reasoning, usage=_usage(usage, reasoning_text=reasoning))
-    return ChatCompletionResult(content=content, reasoning=reasoning, tool_calls=tool_calls, usage=_usage(usage, reasoning_text=reasoning))
+        return ChatCompletionResult(content=_undeclared_tool_call_content(tool_calls, content), reasoning=reasoning, finish_reason=finish_reason, usage=_usage(usage, reasoning_text=reasoning))
+    return ChatCompletionResult(content=content, reasoning=reasoning, finish_reason=finish_reason, tool_calls=tool_calls, usage=_usage(usage, reasoning_text=reasoning))
 
 
 def _native_chat_completion_result(data: dict[str, Any], *, tools_requested: bool) -> ChatCompletionResult:
@@ -158,9 +165,10 @@ def _native_chat_completion_result(data: dict[str, Any], *, tools_requested: boo
     reasoning = message.get("thinking") or message.get("reasoning") or ""
     tool_calls = _normalize_tool_calls(message.get("tool_calls") or [])
     usage = _usage(_native_ollama_data(data), reasoning_text=reasoning)
+    finish_reason = data.get("done_reason") or data.get("finish_reason")
     if tool_calls and not tools_requested:
-        return ChatCompletionResult(content=_undeclared_tool_call_content(tool_calls, content), reasoning=reasoning, usage=usage)
-    return ChatCompletionResult(content=content, reasoning=reasoning, tool_calls=tool_calls, usage=usage)
+        return ChatCompletionResult(content=_undeclared_tool_call_content(tool_calls, content), reasoning=reasoning, finish_reason=finish_reason, usage=usage)
+    return ChatCompletionResult(content=content, reasoning=reasoning, finish_reason=finish_reason, tool_calls=tool_calls, usage=usage)
 
 
 def _stream_json(raw: str) -> dict[str, Any]:
@@ -240,10 +248,39 @@ def _ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     native = []
     for message in messages:
         item = dict(message)
+        item = _ollama_message_content(item)
         if item.get("tool_calls"):
             item["tool_calls"] = [_ollama_tool_call(call) for call in item["tool_calls"]]
         native.append(item)
     return native
+
+
+def _ollama_message_content(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+
+    text_parts: list[str] = []
+    images: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            text_parts.append(str(part))
+            continue
+        part_type = part.get("type")
+        if part_type == "input_image":
+            image_data = part.get("image_base64")
+            if isinstance(image_data, str) and image_data:
+                images.append(image_data)
+        elif part_type == "input_file":
+            text_parts.append(content_to_text([part]))
+        else:
+            text_parts.append(content_to_text([part]))
+
+    mapped = dict(message)
+    mapped["content"] = "\n".join(text for text in text_parts if text)
+    if images:
+        mapped["images"] = images
+    return mapped
 
 
 def _ollama_tool_call(call: dict[str, Any]) -> dict[str, Any]:
@@ -287,11 +324,13 @@ def _ollama_response_format(response_format: Any) -> Any:
 
 def _ollama_think(payload: dict[str, Any]) -> bool | str | None:
     reasoning = payload.get("reasoning")
+    model = _payload_model(payload).lower()
     if not isinstance(reasoning, dict):
+        if "gpt-oss" in model or model.startswith("gpt-oss"):
+            return False
         return None
 
     effort = reasoning.get("effort")
-    model = _payload_model(payload).lower()
     if effort in {"low", "medium", "high"}:
         return effort
     if effort in {"none", "minimal"}:
@@ -372,6 +411,24 @@ def _stream_delta(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _stream_finish_reason(data: dict[str, Any]) -> str | None:
+    choices = data.get("choices") or []
+    if choices:
+        choice = choices[0] or {}
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            return str(finish_reason)
+    finish_reason = data.get("done_reason") or data.get("finish_reason")
+    return str(finish_reason) if finish_reason else None
+
+
+def _done_chunk(usage: dict[str, int], finish_reason: str | None) -> dict[str, Any]:
+    chunk: dict[str, Any] = {"type": "done", "usage": usage}
+    if finish_reason is not None:
+        chunk["finish_reason"] = finish_reason
+    return chunk
+
+
 def _stream_reasoning_delta(data: dict[str, Any]) -> str | None:
     choices = data.get("choices") or []
     if choices:
@@ -395,6 +452,26 @@ def _stream_reasoning_delta(data: dict[str, Any]) -> str | None:
     if "reasoning" in data:
         return str(data.get("reasoning") or "")
     return None
+
+
+def _stream_tool_calls(data: dict[str, Any]) -> list[dict[str, Any]]:
+    choices = data.get("choices") or []
+    tool_calls: Any = None
+    if choices:
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        if delta.get("tool_calls"):
+            tool_calls = delta.get("tool_calls")
+        else:
+            message = choice.get("message") or {}
+            tool_calls = message.get("tool_calls")
+    if tool_calls is None:
+        message = data.get("message") or {}
+        if isinstance(message, dict):
+            tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return []
+    return _normalize_tool_calls(tool_calls)
 
 
 def _has_native_ollama_usage(data: dict[str, Any]) -> bool:

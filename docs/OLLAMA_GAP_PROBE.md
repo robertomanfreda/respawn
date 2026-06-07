@@ -17,8 +17,9 @@ Probe context:
 Current Ollama already exposes a basic `POST /v1/responses` compatibility
 surface. Respawn is therefore not useful because Ollama has no Responses
 endpoint at all. Respawn is useful because it turns that shallow model-facing
-surface into an application gateway with state, retrieval, local tools,
-contract checks, usage details, benchmark coverage, and observability.
+surface into an application gateway with state, retrieval, client-driven
+function tool protocol handling, explicit unsupported-tool errors, contract
+checks, usage details, benchmark coverage, and observability.
 
 ## Probe Results
 
@@ -30,11 +31,11 @@ contract checks, usage details, benchmark coverage, and observability.
 | `POST /v1/responses/input_tokens` | `404` | Works | Respawn provides preflight token accounting. |
 | `previous_response_id` | Accepted | Works with stored chain | Respawn makes the chain inspectable and tenant/storage aware. |
 | Structured output | Works | Works plus validation/repair | Respawn validates output against JSON Schema and repairs once. |
-| Function tools | Returns a `function_call` | Executes local tool loop | Respawn turns tool calls into completed local tool workflows. |
+| Function tools | May return a `function_call` | Supports function-tool protocol, storage, replay, streaming, and client-submitted outputs | Respawn preserves protocol semantics and client-executed tool loops without running tools locally. |
 | Reasoning | Returns reasoning item | Returns reasoning item and usage | Respawn summarizes locally and does not expose raw reasoning content. |
 | Prompt cache details | `cached_tokens=0` on repeated prefix | Reports local cached prefix tokens | Respawn exposes cache accounting for repeated prompt prefixes. |
 | `store=false` retrieval | Not a durable object model | Returns `404` as expected | Respawn makes storage semantics explicit. |
-| Metrics/dashboard | Ollama-native only | Gateway + model + token + tool metrics | Respawn can be operated and benchmarked as infrastructure. |
+| Metrics/dashboard | Ollama-native only | Gateway + model + token metrics | Respawn can be operated and benchmarked as infrastructure. |
 
 ## Concrete Observations
 
@@ -47,7 +48,8 @@ Direct Ollama probe:
 - Repeating a long prompt with `prompt_cache_key` kept
   `usage.input_tokens_details.cached_tokens` at `0`.
 - A function-tool request returned output item types `reasoning` and
-  `function_call`, but did not execute the tool.
+  `function_call`, but did not execute the tool. Phase 6 uses this as a
+  protocol-compatibility target while keeping tool execution on the client side.
 - A simple Responses call returned `output_text: null`; all generation budget was
   consumed by reasoning in the observed run, leaving an empty message text.
 - The reasoning object included raw backend reasoning-like content in fields such
@@ -61,12 +63,6 @@ Respawn probe:
 
 ```json
 {"status": "ok", "feature": "respawn"}
-```
-
-- Local calculator tool execution returned a final assistant answer:
-
-```text
-The product of 19 and 23 is 437.
 ```
 
 - Reasoning request returned output item types `reasoning` and `message`, with
@@ -83,8 +79,8 @@ Respawn is the control plane around a local model runtime:
 
 - It provides an OpenAI-shaped API surface for clients that expect Responses
   state, response IDs, input items, token counts, and usage details.
-- It executes local tools and records tool calls instead of merely passing tool
-  declarations to the model.
+- It supports client-driven function tool protocol loops while rejecting
+  hosted/internal tool execution explicitly.
 - It hardens compatibility by returning explicit OpenAI-shaped errors for
   unsupported fields.
 - It adds observability with Prometheus/VictoriaMetrics/Grafana signals around
@@ -98,4 +94,4 @@ Respawn is the control plane around a local model runtime:
 - Respawn prompt-cache accounting is local gateway accounting. It does not skip
   backend prefill or reuse Ollama KV tensors.
 - Respawn still depends on the configured backend for model quality and native
-  reasoning/tool-call behavior.
+  reasoning behavior.

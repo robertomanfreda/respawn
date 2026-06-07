@@ -9,7 +9,6 @@ from src.services.response_service import ResponseService
 from src.services.responses_compat import validate_text_responses_request
 from src.storage.repository import ResponseRepository
 from src.streaming.sse import sse_response
-from src.tools.registry import ToolRegistry
 
 router = APIRouter(prefix="/v1/responses", tags=["responses"])
 
@@ -20,7 +19,8 @@ def service(request: Request, session: AsyncSession) -> ResponseService:
         repository=ResponseRepository(session),
         backend=request.app.state.backend,
         prompt_cache=request.app.state.prompt_cache,
-        registry=request.app.state.tool_registry,
+        session_factory=request.app.state.async_session,
+        background_tasks=request.app.state.background_tasks,
     )
 
 
@@ -69,12 +69,23 @@ async def list_response_input_items(
     response_id: str,
     request: Request,
     after: str | None = None,
+    before: str | None = None,
     limit: int = Query(default=20, ge=1, le=100),
     order: str = "desc",
     session: AsyncSession = Depends(get_session),
     tenant: str | None = Depends(tenant_id),
 ):
-    return await service(request, session).list_input_items(response_id, tenant, after=after, limit=limit, order=order)
+    return await service(request, session).list_input_items(response_id, tenant, after=after, before=before, limit=limit, order=order)
+
+
+@router.post("/{response_id}/cancel", response_model=ResponseObject)
+async def cancel_response(
+    response_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    tenant: str | None = Depends(tenant_id),
+):
+    return await service(request, session).cancel(response_id, tenant)
 
 
 @router.delete("/{response_id}", response_model=ResponseDeleted)

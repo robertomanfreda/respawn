@@ -8,15 +8,15 @@ from fastapi.exceptions import RequestValidationError
 from src import __version__
 from src.adapters.mock_backend import MockBackend
 from src.adapters.ollama_backend import OllamaBackend
-from src.api import chat, health, metrics, models, responses
+from src.api import chat, compatibility, health, metrics, models, responses
 from src.config import get_settings
 from src.observability.logging import configure_logging
 from src.observability.metrics import ERRORS, REQUEST_LATENCY, REQUESTS
 from src.schemas.errors import OpenAIError, openai_error_handler, request_validation_error_handler
 from src.services.id_generator import generate_id
 from src.services.prompt_cache import PromptCache
+from src.services.response_service import resume_background_responses, shutdown_background_responses
 from src.storage import create_engine, create_sessionmaker, create_tables
-from src.tools.registry import default_registry
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.async_session = create_sessionmaker(engine)
     app.state.backend = build_backend(settings)
+    app.state.background_tasks = {}
     app.state.prompt_cache = PromptCache(
         enabled=settings.prompt_cache_enabled,
         min_tokens=settings.prompt_cache_min_tokens,
@@ -50,10 +51,17 @@ async def lifespan(app: FastAPI):
         extended_ttl_seconds=settings.prompt_cache_extended_ttl_seconds,
         chunk_tokens=settings.prompt_cache_chunk_tokens,
     )
-    app.state.tool_registry = default_registry()
     if settings.auto_create_tables:
         await create_tables(engine)
+    await resume_background_responses(
+        settings=settings,
+        session_factory=app.state.async_session,
+        backend=app.state.backend,
+        prompt_cache=app.state.prompt_cache,
+        background_tasks=app.state.background_tasks,
+    )
     yield
+    await shutdown_background_responses(app.state.background_tasks)
     await engine.dispose()
 
 
@@ -84,6 +92,7 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(health.router)
+    app.include_router(compatibility.router)
     app.include_router(metrics.router)
     app.include_router(models.router)
     app.include_router(chat.router)
