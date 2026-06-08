@@ -108,3 +108,31 @@ def test_compatibility_report_lists_skipped_surfaces():
     assert [surface["id"] for surface in report["surfaces"]["supported"]] == ["feature.supported"]
     assert [surface["id"] for surface in report["surfaces"]["unsupported"]] == ["feature.unsupported"]
     assert [surface["id"] for surface in report["surfaces"]["skipped"]] == ["feature.supported"]
+
+
+def test_benchmark_report_comparison_tracks_case_and_latency_deltas():
+    benchmark = _load_benchmark_module()
+    current = {
+        "cases": [
+            {"name": "case.one", "status": "passed", "latency_ms": 20.0},
+            {"name": "case.two", "status": "passed", "latency_ms": 10.0},
+        ],
+        "latency": {"responses_blocking": {"p50_ms": 90.0}},
+    }
+    previous = {
+        "cases": [
+            {"name": "case.one", "status": "failed", "latency_ms": 12.0},
+            {"name": "case.removed", "status": "passed", "latency_ms": 30.0},
+        ],
+        "latency": {"responses_blocking": {"p50_ms": 100.0}},
+    }
+
+    comparison = benchmark.compare_reports(current, previous)
+
+    assert comparison["status"] == "compared"
+    assert comparison["case_counts"]["passed_delta"] == 1
+    assert comparison["case_counts"]["failed_delta"] == -1
+    assert comparison["case_counts"]["new_cases"] == ["case.two"]
+    assert comparison["case_counts"]["removed_cases"] == ["case.removed"]
+    assert comparison["latency"]["responses_blocking"]["p50_delta_ms"] == -10.0
+    assert comparison["slowest_case_regressions"][0]["name"] == "case.one"

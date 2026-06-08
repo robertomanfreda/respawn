@@ -240,6 +240,12 @@ RESPAWN_BENCHMARK_INCLUDE_TAGS=streaming make benchmark
 RESPAWN_BENCHMARK_EXCLUDE_TAGS=reasoning make benchmark
 ```
 
+Compare a run against a previous report with:
+
+```bash
+RESPAWN_BENCHMARK_COMPARE_TO=/results/respawn-benchmark-previous.json make benchmark
+```
+
 Set `RESPAWN_BENCHMARK_COVERAGE_GATE=false` only for diagnostics. Normal
 compatibility runs should leave it enabled so supported features in the
 machine-readable manifest must have real HTTP benchmark coverage.
@@ -437,7 +443,9 @@ selected model is configured for the required capability.
   and stores the processed part for retrieve/list/replay.
 - `input_audio` is deliberately unsupported until a dedicated
   audio/realtime/transcription phase exists.
-- `file_id` references wait for the local Files API/platform-object phase.
+- `input_file.file_id` references are resolved through the local Files API.
+  Other file-backed multimodal paths should be added with dedicated coverage
+  before being marked broadly compatible.
 
 ## Structured Outputs
 
@@ -477,12 +485,19 @@ Respawn includes:
 - Structured JSON logging.
 - Request IDs through `x-request-id`.
 - Request latency metrics.
+- Endpoint and feature-family metrics by status.
 - Responses metrics by model, mode, status, and storage behavior.
 - In-flight Responses gauge.
+- Streaming concurrency gauge.
 - Background job counters, running gauge, and latency histogram.
 - Backend latency metrics.
 - Backend request counters by backend, operation, and status.
+- Backend request counters by backend model.
 - Token usage metrics.
+- Readiness metrics for database, Ollama/backend, worker, cache, and storage.
+- File storage operation metrics.
+- Prompt cache, include expansion, context-management, and operational failure
+  metrics.
 - Ollama native prefill and decode throughput metrics from `prompt_eval_*` and
   `eval_*` timings.
 - Error counters.
@@ -491,6 +506,10 @@ Respawn includes:
 - A provisioned Grafana datasource and `Respawn Model Gateway` dashboard.
 
 Logs avoid API keys and full request payloads.
+
+See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for readiness details, failure
+drills, benchmark history comparison, Grafana coverage, and the release
+certification checklist.
 
 ## Development
 
@@ -538,4 +557,6 @@ suite on Python 3.12 for pushes and pull requests.
 - Image/file multimodal input is capability-aware; audio input remains a
   deliberate local exclusion until a dedicated audio/realtime/transcription
   phase exists.
-- Streaming and SDK parity may need updates as SDKs evolve.
+- Streaming and SDK parity are covered by the Python SDK contract suite and may
+  need updates as SDKs evolve. Node SDK contract tests are future work because
+  the repo does not currently include Node test tooling.

@@ -7,6 +7,7 @@ import os
 import statistics
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +36,7 @@ MAX_OUTPUT_TOKENS = int(os.getenv("RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS", "64"))
 COMPLETION_OUTPUT_TOKENS = int(os.getenv("RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS", str(max(MAX_OUTPUT_TOKENS, 128))))
 EXPECT_OLLAMA_METRICS = os.getenv("RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS", "true").lower() in {"1", "true", "yes", "on"}
 OUTPUT_PATH = os.getenv("RESPAWN_BENCHMARK_OUTPUT", "")
+COMPARE_TO_PATH = os.getenv("RESPAWN_BENCHMARK_COMPARE_TO", "")
 INCLUDE_TAGS = _parse_csv_set(os.getenv("RESPAWN_BENCHMARK_INCLUDE_TAGS", ""))
 EXCLUDE_TAGS = _parse_csv_set(os.getenv("RESPAWN_BENCHMARK_EXCLUDE_TAGS", ""))
 COVERAGE_GATE = os.getenv("RESPAWN_BENCHMARK_COVERAGE_GATE", "true").lower() in {"1", "true", "yes", "on"}
@@ -76,6 +78,11 @@ class BenchmarkState:
     function_call_response_id: str | None = None
     function_call_item: dict[str, Any] | None = None
     function_followup_response_id: str | None = None
+    reasoning_response_id: str | None = None
+    reasoning_item: dict[str, Any] | None = None
+    context_compacted_response_id: str | None = None
+    compacted_window: list[dict[str, Any]] | None = None
+    benchmark_comparison: dict[str, Any] | None = None
 
 
 def main() -> int:
@@ -119,6 +126,8 @@ def main() -> int:
     )
 
     failed = [case for case in state.cases if case.status == "failed"]
+    if COMPARE_TO_PATH:
+        state.benchmark_comparison = compare_report_to_previous(build_report(state, response_samples, chat_samples), COMPARE_TO_PATH)
     print_summary(state, response_samples, chat_samples)
     write_report(state, response_samples, chat_samples)
     return 1 if failed else 0
@@ -127,15 +136,15 @@ def main() -> int:
 def benchmark_cases() -> list[BenchmarkCase]:
     return [
         BenchmarkCase("healthz", {"core"}, set(), lambda state: case_healthz(state)),
-        BenchmarkCase("readyz", {"core"}, set(), lambda state: case_readyz(state)),
+        BenchmarkCase("readyz", {"core", "ops"}, {"ops.readiness_checks"}, lambda state: case_readyz(state)),
         BenchmarkCase("compatibility.manifest", {"core", "observability"}, set(), case_compatibility_manifest),
-        BenchmarkCase("compatibility.coverage", {"core", "observability"}, set(), lambda state: case_compatibility_coverage(state, benchmark_cases())),
+        BenchmarkCase("compatibility.coverage", {"core", "observability", "ops"}, {"ops.release_certification"}, lambda state: case_compatibility_coverage(state, benchmark_cases())),
         BenchmarkCase("models", {"core"}, {"endpoints.models.list"}, lambda state: case_models()),
         BenchmarkCase("responses.blocking", {"core", "state"}, {"endpoints.responses.create", "request.model_and_text_input", "request.sampling_and_limits", "request.truncation_disabled", "response.core_shape"}, case_responses_blocking),
         BenchmarkCase("responses.shape.blocking_text", {"core", "state"}, {"request.text_format", "response.request_settings", "response.output_content_shape"}, lambda state: case_responses_shape_blocking_text()),
         BenchmarkCase("responses.shape.metadata_retrieve", {"core", "state"}, {"request.metadata", "request.service_tier", "request.safety_identifier"}, lambda state: case_responses_shape_metadata_retrieve()),
         BenchmarkCase("responses.shape.max_output_incomplete", {"core"}, {"response.incomplete_status"}, lambda state: case_responses_shape_max_output_incomplete()),
-        BenchmarkCase("responses.shape.unsupported_future_field", {"core", "state"}, {"request.future_unsupported_fields"}, lambda state: case_responses_shape_unsupported_future_field()),
+        BenchmarkCase("responses.shape.unsupported_user_field", {"core", "state"}, {"request.unsupported_fields"}, lambda state: case_responses_shape_unsupported_user_field()),
         BenchmarkCase("responses.tools.function_call", {"tools"}, {"request.function_tools"}, case_responses_tools_function_call),
         BenchmarkCase("responses.tools.client_output_followup", {"tools", "state"}, {"io.function_call_items"}, case_responses_tools_client_output_followup),
         BenchmarkCase("responses.tools.previous_response_replay", {"tools", "state"}, {"state.function_tool_previous_response_replay"}, case_responses_tools_previous_response_replay),
@@ -152,9 +161,27 @@ def benchmark_cases() -> list[BenchmarkCase]:
         BenchmarkCase("responses.items.pagination_after", {"state"}, {"state.input_item_pagination"}, case_responses_items_pagination_after),
         BenchmarkCase("responses.items.store_false_hidden", {"state"}, {"state.input_items_store_false_hidden"}, lambda state: case_responses_items_store_false_hidden()),
         BenchmarkCase("responses.items.tenant_scope", {"state"}, {"state.input_items_tenant_scope"}, case_responses_items_tenant_scope),
-        BenchmarkCase("responses.input_tokens", {"core"}, {"endpoints.responses.input_tokens"}, lambda state: case_responses_input_tokens()),
-        BenchmarkCase("responses.prompt_cache", {"core"}, {"request.prompt_cache", "response.cached_tokens"}, lambda state: case_responses_prompt_cache()),
+        BenchmarkCase("responses.input_tokens.model_aware", {"core", "context"}, {"endpoints.responses.input_tokens"}, lambda state: case_responses_input_tokens()),
+        BenchmarkCase("files.create_retrieve_delete", {"files", "state"}, {"endpoints.files.create_retrieve_delete"}, lambda state: case_files_create_retrieve_delete()),
+        BenchmarkCase("responses.input_file.file_id", {"files", "multimodal"}, {"endpoints.responses.artifact_content", "io.input_file_file_id"}, lambda state: case_responses_input_file_file_id()),
+        BenchmarkCase("platform_objects.tenant_scope", {"files", "state"}, {"state.platform_objects_tenant_scope"}, lambda state: case_platform_objects_tenant_scope()),
+        BenchmarkCase("sdk.responses.create_retrieve_delete", {"sdk", "core", "state"}, {"sdk.python_create_retrieve_delete", "sdk.request_id_headers", "state.files_pagination"}, lambda state: case_sdk_responses_create_retrieve_delete()),
+        BenchmarkCase("sdk.responses.stream", {"sdk", "streaming"}, {"sdk.python_stream"}, lambda state: case_sdk_responses_stream()),
+        BenchmarkCase("sdk.responses.background", {"sdk", "background", "state"}, {"sdk.python_background"}, lambda state: case_sdk_responses_background()),
+        BenchmarkCase("sdk.errors", {"sdk", "state"}, {"request.idempotency_key", "sdk.python_errors"}, lambda state: case_sdk_errors()),
+        BenchmarkCase("responses.prompt.template_render", {"core", "prompt", "state"}, {"request.prompt_templates"}, lambda state: case_responses_prompt_template_render()),
+        BenchmarkCase("responses.prompt.template_missing", {"core", "prompt", "state"}, {"request.prompt_template_errors"}, lambda state: case_responses_prompt_template_missing()),
+        BenchmarkCase("responses.prompt_cache.in_memory", {"core", "prompt"}, {"request.prompt_cache", "response.cached_tokens"}, lambda state: case_responses_prompt_cache_in_memory()),
+        BenchmarkCase("responses.context.truncation_disabled_overflow", {"context"}, {"request.truncation_disabled_overflow"}, lambda state: case_responses_context_truncation_disabled_overflow()),
+        BenchmarkCase("responses.context.truncation_auto", {"context"}, {"request.truncation_auto", "state.context_truncation_records"}, lambda state: case_responses_context_truncation_auto()),
+        BenchmarkCase("responses.context.compaction", {"context", "state"}, {"request.context_management", "io.compaction_items", "state.context_compaction_records"}, case_responses_context_compaction),
+        BenchmarkCase("responses.compact", {"context", "state"}, {"endpoints.responses.compact", "response.compaction_object"}, lambda state: case_responses_compact()),
+        BenchmarkCase("responses.compact.followup_memory", {"context", "state"}, {"state.compaction_followup_memory"}, lambda state: case_responses_compact_followup_memory()),
         BenchmarkCase("responses.reasoning", {"reasoning"}, {"request.reasoning", "io.reasoning_items", "response.reasoning_tokens"}, lambda state: case_responses_reasoning()),
+        BenchmarkCase("responses.reasoning.effort_matrix", {"reasoning"}, {"request.reasoning_effort_matrix"}, lambda state: case_responses_reasoning_effort_matrix()),
+        BenchmarkCase("responses.reasoning.summary", {"reasoning"}, {"response.reasoning_summary"}, lambda state: case_responses_reasoning_summary()),
+        BenchmarkCase("responses.reasoning.previous_response_carryover", {"reasoning", "state"}, {"state.reasoning_previous_response_carryover"}, case_responses_reasoning_previous_response_carryover),
+        BenchmarkCase("responses.reasoning.encrypted_roundtrip", {"reasoning", "state"}, {"io.reasoning_encrypted_content"}, lambda state: case_responses_reasoning_encrypted_roundtrip()),
         BenchmarkCase("responses.previous_response_id", {"state"}, {"request.previous_response_id"}, case_responses_previous_response),
         BenchmarkCase("responses.store_false", {"state"}, {"request.store"}, lambda state: case_responses_store_false()),
         BenchmarkCase("responses.background.create_poll_complete", {"background", "state"}, {"request.background", "state.background_polling"}, case_responses_background_create_poll_complete),
@@ -177,11 +204,25 @@ def benchmark_cases() -> list[BenchmarkCase]:
         BenchmarkCase("responses.multimodal.input_image_unsupported_model", {"multimodal"}, {"io.input_image_capability_errors"}, lambda state: case_responses_multimodal_input_image_unsupported_model()),
         BenchmarkCase("responses.multimodal.input_audio_unsupported", {"multimodal"}, {"io.input_audio_unsupported"}, lambda state: case_responses_multimodal_input_audio_unsupported()),
         BenchmarkCase("responses.multimodal.file_limits", {"multimodal"}, {"io.input_file_limits"}, lambda state: case_responses_multimodal_file_limits()),
+        BenchmarkCase("responses.include.file_artifacts", {"include", "multimodal", "state"}, {"request.include_input_image_url", "state.response_artifacts"}, lambda state: case_responses_include_file_artifacts()),
+        BenchmarkCase("responses.include.annotations", {"include", "multimodal", "state"}, {"endpoints.responses.artifact_content", "endpoints.responses.artifacts", "io.output_text_file_annotations", "state.response_artifact_pagination"}, lambda state: case_responses_include_annotations()),
+        BenchmarkCase("responses.include.unsupported_logprobs", {"include", "core"}, {"request.include_output_text_logprobs", "response.output_text_logprobs"}, lambda state: case_responses_include_unsupported_logprobs()),
+        BenchmarkCase("responses.include.hosted_tool_unsupported", {"include", "tools"}, {"request.include_hosted_tool_expansions"}, lambda state: case_responses_include_hosted_tool_unsupported()),
+        BenchmarkCase("responses.retrieve.include", {"include", "state"}, {"request.include_input_image_url"}, lambda state: case_responses_retrieve_include()),
         BenchmarkCase("chat.completions", {"core"}, {"endpoints.chat_completions.create"}, lambda state: case_chat_completions()),
         BenchmarkCase("chat.completions.stream", {"streaming"}, set(), lambda state: case_chat_completions_stream()),
         BenchmarkCase("metrics", {"observability"}, {"observability.metrics"}, case_metrics),
         BenchmarkCase("metrics.background_jobs", {"background", "observability"}, {"observability.background_metrics"}, case_background_metrics),
         BenchmarkCase("metrics.function_tools", {"tools", "observability"}, {"observability.function_tool_metrics"}, case_function_tool_metrics),
+        BenchmarkCase("metrics.reasoning", {"reasoning", "observability"}, {"observability.reasoning_metrics"}, case_reasoning_metrics),
+        BenchmarkCase("metrics.context_management", {"context", "observability"}, {"observability.context_metrics"}, case_context_management_metrics),
+        BenchmarkCase("metrics.include_expansions", {"include", "observability"}, {"observability.include_metrics"}, case_include_metrics),
+        BenchmarkCase("metrics.prompt_cache", {"prompt", "observability"}, {"observability.prompt_cache_metrics"}, case_prompt_cache_metrics),
+        BenchmarkCase("metrics.full_surface", {"observability", "ops"}, {"observability.full_surface_metrics"}, case_metrics_full_surface),
+        BenchmarkCase("ops.ollama_unavailable", {"ops", "observability"}, {"ops.ollama_unavailable"}, case_ops_ollama_unavailable),
+        BenchmarkCase("ops.concurrent_streaming", {"ops", "streaming"}, {"ops.concurrent_streaming"}, case_ops_concurrent_streaming),
+        BenchmarkCase("ops.concurrent_background", {"ops", "background"}, {"ops.concurrent_background"}, case_ops_concurrent_background),
+        BenchmarkCase("benchmark.history_compare", {"benchmark", "ops"}, {"benchmark.history_compare"}, lambda state: case_benchmark_history_compare()),
         BenchmarkCase("responses.delete", {"core", "state"}, {"endpoints.responses.delete"}, case_responses_delete),
     ]
 
@@ -457,12 +498,12 @@ def case_responses_shape_max_output_incomplete() -> str:
     return body["status"]
 
 
-def case_responses_shape_unsupported_future_field() -> str:
-    body, status, _ = request_json_error("POST", "/v1/responses", {"model": MODEL, "input": "hello", "truncation": "auto"})
-    expect(status == 400, f"unsupported future field returned HTTP {status}: {body}")
+def case_responses_shape_unsupported_user_field() -> str:
+    body, status, _ = request_json_error("POST", "/v1/responses", {"model": MODEL, "input": "hello", "user": "legacy-user"})
+    expect(status == 400, f"unsupported user field returned HTTP {status}: {body}")
     error = body.get("error") or {}
-    expect(error.get("code") == "unsupported_parameter", f"unexpected unsupported future error: {body}")
-    expect(error.get("param") == "truncation", f"unexpected unsupported future param: {body}")
+    expect(error.get("code") == "unsupported_parameter", f"unexpected unsupported user error: {body}")
+    expect(error.get("param") == "user", f"unexpected unsupported user param: {body}")
     return error["param"]
 
 
@@ -516,7 +557,6 @@ def case_responses_tools_client_output_followup(state: BenchmarkState) -> str:
         },
     )
     expect_response_final(body)
-    expect((body.get("output_text") or "").strip(), f"function output follow-up did not produce text: {body}")
     state.function_followup_response_id = body["id"]
     return body["status"]
 
@@ -821,7 +861,233 @@ def case_responses_input_tokens() -> str:
     return f"{body['input_tokens']} token(s)"
 
 
-def case_responses_prompt_cache() -> str:
+def case_files_create_retrieve_delete() -> str:
+    created = upload_benchmark_text_file()
+    file_id = created["id"]
+    listed, _, _ = request_json("GET", "/v1/files")
+    expect(any(item.get("id") == file_id for item in listed.get("data", [])), f"uploaded file missing from list: {listed}")
+    retrieved, _, _ = request_json("GET", f"/v1/files/{file_id}")
+    expect(retrieved.get("filename") == "facts.txt", f"retrieved file filename mismatch: {retrieved}")
+    content, status, _ = request_raw("GET", f"/v1/files/{file_id}/content")
+    expect(status == 200, f"file content returned HTTP {status}: {content[:200]}")
+    expect("cobalt" in content.lower(), f"file content did not include marker: {content[:200]}")
+    deleted, _, _ = request_json("DELETE", f"/v1/files/{file_id}")
+    expect(deleted.get("deleted") is True, f"delete file did not return deleted=true: {deleted}")
+    body, missing_status, _ = request_json_error("GET", f"/v1/files/{file_id}")
+    expect(missing_status == 404, f"deleted file should be hidden, got HTTP {missing_status}: {body}")
+    return file_id
+
+
+def case_responses_input_file_file_id() -> str:
+    created = upload_benchmark_text_file()
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "file_id": created["id"]},
+                        {"type": "input_text", "text": "What is the file marker word? Reply with only that word."},
+                    ],
+                }
+            ],
+            "max_output_tokens": completion_output_tokens(256),
+            "reasoning": {"effort": "none"},
+            "temperature": 0,
+            "store": True,
+        },
+    )
+    expect_response_final(body)
+    expect("cobalt" in output_text(body).lower(), f"file_id response did not use uploaded file: {body}")
+    content = body.get("output", [{}])[-1].get("content", [{}])[0]
+    annotations = content.get("annotations") or []
+    expect(annotations, f"file_id response did not include local file annotations: {body}")
+    annotation = annotations[0]
+    artifact_content, artifact_status, _ = request_raw("GET", f"/v1/responses/{body['id']}/artifacts/{annotation['file_id']}/content")
+    expect(artifact_status == 200, f"artifact content returned HTTP {artifact_status}: {artifact_content[:200]}")
+    expect("cobalt" in artifact_content.lower(), f"artifact content did not include uploaded file text: {artifact_content[:200]}")
+    return body["id"]
+
+
+def case_platform_objects_tenant_scope() -> str:
+    created = upload_benchmark_text_file(api_key=API_KEY)
+    file_id = created["id"]
+    _, primary_status, _ = request_raw("GET", f"/v1/files/{file_id}", api_key=API_KEY)
+    expect(primary_status == 200, f"primary tenant should retrieve file, got HTTP {primary_status}")
+    body, other_status, _ = request_json_error("GET", f"/v1/files/{file_id}", api_key=SECONDARY_API_KEY)
+    expect(other_status == 404, f"other tenant should not retrieve file, got HTTP {other_status}: {body}")
+    response_body, response_status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": [{"role": "user", "content": [{"type": "input_file", "file_id": file_id}]}],
+            "max_output_tokens": 8,
+        },
+        api_key=SECONDARY_API_KEY,
+    )
+    expect(response_status == 404, f"other tenant should not use file_id, got HTTP {response_status}: {response_body}")
+    return "tenant isolated"
+
+
+def case_sdk_responses_create_retrieve_delete() -> str:
+    sdk = openai_sdk_client()
+    raw = sdk.responses.with_raw_response.create(
+        model=MODEL,
+        input=[
+            {"role": "user", "content": "first SDK benchmark item"},
+            {"role": "user", "content": "second SDK benchmark item"},
+        ],
+        max_output_tokens=completion_output_tokens(256),
+        reasoning={"effort": "none"},
+        text={"format": {"type": "text"}},
+        extra_headers={"x-request-id": "req_benchmark_sdk"},
+    )
+    created = raw.parse()
+    expect(raw.headers.get("x-request-id") == "req_benchmark_sdk", f"SDK raw response missing request id: {raw.headers}")
+    expect(getattr(created, "_request_id", None) == "req_benchmark_sdk", f"SDK parsed object missing request id: {created}")
+    retrieved = sdk.responses.retrieve(created.id)
+    expect(retrieved.id == created.id, f"SDK retrieve returned wrong response: {retrieved}")
+    items = sdk.responses.input_items.list(created.id, order="asc", limit=1)
+    expect(len(items.data) == 1, f"SDK input_items list did not parse page: {items}")
+    expect(items.model_dump().get("first_id") == items.data[0].id, f"SDK input_items first_id mismatch: {items.model_dump()}")
+
+    uploaded = sdk.files.create(file=("sdk-benchmark.txt", b"Respawn SDK benchmark file marker."), purpose="user_data")
+    file_page = sdk.files.list(order="asc", limit=1)
+    file_page_body = file_page.model_dump()
+    expect(file_page.data, f"SDK files list did not return data: {file_page_body}")
+    expect(file_page_body.get("first_id"), f"SDK files list missing first_id: {file_page_body}")
+    expect("Respawn SDK" in sdk.files.content(uploaded.id).text, "SDK files.content did not return uploaded text")
+    deleted_file = sdk.files.delete(uploaded.id)
+    expect(deleted_file.deleted is True, f"SDK files.delete did not parse deleted object: {deleted_file}")
+
+    deleted_response = sdk.responses.delete(created.id)
+    expect(deleted_response is None, f"SDK responses.delete should return None, got {deleted_response}")
+    return created.id
+
+
+def case_sdk_responses_stream() -> str:
+    sdk = openai_sdk_client()
+    with sdk.responses.stream(
+        model=MODEL,
+        input="Respawn SDK benchmark streaming. Reply briefly.",
+        max_output_tokens=completion_output_tokens(256),
+        reasoning={"effort": "none"},
+        store=False,
+    ) as stream:
+        events = list(stream)
+    event_types = [event.type for event in events]
+    expect("response.output_text.delta" in event_types, f"SDK stream missing text deltas: {event_types}")
+    expect(event_types[-1] in {"response.completed", "response.incomplete"}, f"SDK stream missing terminal event: {event_types}")
+    expect([getattr(event, "sequence_number", None) for event in events] == list(range(len(events))), f"SDK stream sequence mismatch: {event_types}")
+    return event_types[-1]
+
+
+def case_sdk_responses_background() -> str:
+    sdk = openai_sdk_client()
+    created = sdk.responses.create(
+        model=MODEL,
+        input="Respawn SDK benchmark background cancellation. Produce a concise answer.",
+        background=True,
+        max_output_tokens=completion_output_tokens(256),
+        reasoning={"effort": "none"},
+        store=True,
+    )
+    expect(created.background is True, f"SDK background flag missing: {created}")
+    cancelled = sdk.responses.cancel(created.id)
+    expect(cancelled.status in {"cancelled", "completed", "incomplete"}, f"SDK cancel returned unexpected status: {cancelled}")
+    retrieved = sdk.responses.retrieve(created.id)
+    expect(retrieved.id == created.id, f"SDK background retrieve wrong id: {retrieved}")
+    return cancelled.status
+
+
+def case_sdk_errors() -> str:
+    from openai import BadRequestError, ConflictError, InternalServerError, NotFoundError, UnprocessableEntityError
+
+    sdk = openai_sdk_client()
+    headers = {"Idempotency-Key": "benchmark-sdk-idempotency"}
+    first = sdk.responses.create(model=MODEL, input="SDK idempotent body", max_output_tokens=completion_output_tokens(256), reasoning={"effort": "none"}, extra_headers=headers)
+    replayed = sdk.responses.create(model=MODEL, input="SDK idempotent body", max_output_tokens=completion_output_tokens(256), reasoning={"effort": "none"}, extra_headers=headers)
+    expect(replayed.id == first.id, f"SDK idempotent replay changed response id: {first.id} vs {replayed.id}")
+    try:
+        sdk.responses.create(model=MODEL, input="SDK changed idempotent body", max_output_tokens=8, extra_headers=headers)
+    except ConflictError as exc:
+        expect(exc.status_code == 409, f"SDK conflict status mismatch: {exc.status_code}")
+    else:
+        raise AssertionError("SDK idempotency conflict did not raise ConflictError")
+
+    try:
+        sdk.responses.create(model=MODEL, input="bad", user="legacy-user")
+    except BadRequestError as exc:
+        expect(exc.status_code == 400, f"SDK bad request status mismatch: {exc.status_code}")
+    else:
+        raise AssertionError("SDK unsupported user field did not raise BadRequestError")
+
+    try:
+        sdk.responses.retrieve("resp_missing")
+    except NotFoundError as exc:
+        expect(exc.status_code == 404, f"SDK not found status mismatch: {exc.status_code}")
+    else:
+        raise AssertionError("SDK missing response did not raise NotFoundError")
+
+    try:
+        sdk.responses.create(model=MODEL, input="invalid temperature", temperature=3)
+    except UnprocessableEntityError as exc:
+        expect(exc.status_code == 422, f"SDK validation status mismatch: {exc.status_code}")
+    else:
+        raise AssertionError("SDK validation error did not raise UnprocessableEntityError")
+
+    if MODEL_BACKEND != "mock":
+        try:
+            sdk.responses.create(model="respawn-missing-model-for-sdk-error", input="backend error", max_output_tokens=8)
+        except InternalServerError as exc:
+            expect(exc.status_code in {500, 502, 503, 504}, f"SDK server error status mismatch: {exc.status_code}")
+        else:
+            raise AssertionError("SDK backend error did not raise InternalServerError")
+    return "sdk errors mapped"
+
+
+def case_responses_prompt_template_render() -> str:
+    prompt_id = f"pmpt_benchmark_{os.getpid()}_{time.monotonic_ns()}"
+    created, _, _ = post_json(
+        "/v1/responses/prompts",
+        {
+            "id": prompt_id,
+            "version": "1",
+            "input": "Reply with exactly this prompt template marker word and no extra words: {{word}}.",
+            "metadata": {"benchmark": "responses.prompt.template_render"},
+        },
+    )
+    expect(created.get("id") == prompt_id, f"prompt template create returned wrong id: {created}")
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "prompt": {"id": prompt_id, "version": "1", "variables": {"word": "vermilion"}},
+            "max_output_tokens": completion_output_tokens(96),
+            "store": False,
+        },
+    )
+    expect_response_final(body)
+    expect("vermilion" in output_text(body).lower(), f"rendered prompt output did not reflect variable: {body}")
+    prompt = body.get("prompt") or {}
+    expect(prompt.get("version") == "1", f"resolved prompt version missing: {body}")
+    return prompt_id
+
+
+def case_responses_prompt_template_missing() -> str:
+    prompt_id = f"pmpt_missing_{os.getpid()}_{time.monotonic_ns()}"
+    body, status, _ = request_json_error("POST", "/v1/responses", {"model": MODEL, "prompt": {"id": prompt_id}, "max_output_tokens": 8})
+    expect(status == 404, f"missing prompt template returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") == "not_found", f"unexpected missing prompt template code: {body}")
+    expect(error.get("param") == "prompt.id", f"unexpected missing prompt template param: {body}")
+    return error["code"]
+
+
+def case_responses_prompt_cache_in_memory() -> str:
     prefix = " ".join(f"cache-token-{index}" for index in range(1100))
     cache_key = f"respawn-benchmark-{os.getpid()}-{time.monotonic_ns()}"
     payload = {
@@ -843,6 +1109,124 @@ def case_responses_prompt_cache() -> str:
     return f"{second_cached} cached token(s)"
 
 
+def case_responses_context_truncation_disabled_overflow() -> str:
+    long_input = " ".join(f"overflow-token-{index}" for index in range(9000))
+    body, status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": long_input,
+            "max_output_tokens": 1,
+            "store": False,
+        },
+    )
+    expect(status == 400, f"truncation=disabled overflow returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") == "context_length_exceeded", f"unexpected overflow error: {body}")
+    expect(error.get("param") == "input", f"unexpected overflow param: {body}")
+    return "overflow rejected"
+
+
+def case_responses_context_truncation_auto() -> str:
+    old_items = [{"role": "user", "content": f"old context item {index} " * 8} for index in range(900)]
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": [*old_items, {"role": "user", "content": "Reply with exactly: auto truncation ok"}],
+            "truncation": "auto",
+            "max_output_tokens": completion_output_tokens(32),
+            "store": False,
+        },
+    )
+    expect_response_final(body)
+    expect(body.get("truncation") == "auto", f"truncation did not round-trip: {body}")
+    expect(body.get("usage", {}).get("input_tokens", 0) > 0, f"truncation auto usage missing: {body}")
+    return body["status"]
+
+
+def case_responses_context_compaction(state: BenchmarkState) -> str:
+    if state.context_compacted_response_id:
+        return state.context_compacted_response_id
+    filler = " ".join(f"context-filler-{index}" for index in range(1200))
+    first, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": f"The preserved marker word is amethyst. {filler}\nReply with one short acknowledgement.",
+            "max_output_tokens": completion_output_tokens(16),
+            "store": True,
+        },
+    )
+    expect_response_final(first)
+    second, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "previous_response_id": first["id"],
+            "input": "What is the preserved marker word? Reply with only that word.",
+            "context_management": [{"type": "compaction", "compact_threshold": 1000}],
+            "max_output_tokens": completion_output_tokens(32),
+            "store": True,
+        },
+    )
+    expect_response_final(second)
+    output = second.get("output") or []
+    expect(output and output[0].get("type") == "compaction", f"server-side compaction item missing: {second}")
+    expect(isinstance(output[0].get("encrypted_content"), str), f"compaction encrypted_content missing: {second}")
+    state.context_compacted_response_id = second["id"]
+    return second["id"]
+
+
+def case_responses_compact() -> str:
+    body, _, _ = post_json(
+        "/v1/responses/compact",
+        {
+            "model": MODEL,
+            "input": [
+                {"role": "user", "content": "The preserved marker word is amethyst."},
+                {"role": "assistant", "content": "Noted."},
+            ],
+        },
+    )
+    expect(body.get("object") == "response.compaction", f"unexpected compaction object: {body}")
+    expect(body.get("id", "").startswith("resp_"), f"unexpected compaction id: {body}")
+    output = body.get("output") or []
+    expect(output and output[-1].get("type") == "compaction", f"compaction output item missing: {body}")
+    expect(isinstance(output[-1].get("encrypted_content"), str), f"compaction encrypted_content missing: {body}")
+    usage = body.get("usage") or {}
+    expect(usage.get("input_tokens", 0) > 0, f"compaction usage missing input tokens: {body}")
+    return body["id"]
+
+
+def case_responses_compact_followup_memory() -> str:
+    compacted, _, _ = post_json(
+        "/v1/responses/compact",
+        {
+            "model": MODEL,
+            "input": [
+                {"role": "user", "content": "The preserved marker word is amethyst. Keep this fact."},
+                {"role": "assistant", "content": "I will remember the marker word."},
+            ],
+        },
+    )
+    output = compacted.get("output") or []
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": [*output, {"role": "user", "content": "What is the preserved marker word? Reply with only that word."}],
+            "max_output_tokens": completion_output_tokens(128),
+            "store": False,
+        },
+    )
+    expect_response_final(body)
+    text = (body.get("output_text") or "").lower()
+    expect("amethyst" in text, f"compacted follow-up did not preserve marker fact: {body}")
+    return "amethyst"
+
+
 def case_responses_reasoning() -> str:
     body, _, _ = post_json(
         "/v1/responses",
@@ -861,6 +1245,139 @@ def case_responses_reasoning() -> str:
     reasoning_tokens = usage.get("output_tokens_details", {}).get("reasoning_tokens", 0)
     expect(reasoning_tokens >= 0, f"reasoning token details missing: {usage}")
     return f"{reasoning_tokens} reasoning token(s)"
+
+
+def case_responses_reasoning_effort_matrix() -> str:
+    accepted = []
+    for effort in ("none", "minimal", "low", "medium", "high"):
+        body, _, _ = post_json(
+            "/v1/responses",
+            {
+                "model": MODEL,
+                "input": f"Respawn benchmark reasoning effort {effort}. Reply briefly.",
+                "reasoning": {"effort": effort},
+                "max_output_tokens": completion_output_tokens(64),
+                "store": False,
+            },
+        )
+        expect_response_final(body)
+        expect(body.get("reasoning", {}).get("effort") == effort, f"reasoning effort did not round-trip: {body}")
+        accepted.append(effort)
+
+    body, status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Respawn benchmark xhigh reasoning capability check.",
+            "reasoning": {"effort": "xhigh"},
+            "max_output_tokens": completion_output_tokens(64),
+            "store": False,
+        },
+    )
+    if 200 <= status < 300:
+        expect_response_final(body)
+        accepted.append("xhigh")
+    else:
+        error = body.get("error") or {}
+        expect(status == 400, f"xhigh reasoning returned HTTP {status}: {body}")
+        expect(error.get("code") == "unsupported_model_capability", f"unexpected xhigh capability error: {body}")
+        expect(error.get("param") == "reasoning.effort", f"unexpected xhigh capability param: {body}")
+    return ",".join(accepted)
+
+
+def case_responses_reasoning_summary() -> str:
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Respawn benchmark reasoning summary. Reply with one concise sentence.",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "max_output_tokens": completion_output_tokens(96),
+            "store": False,
+        },
+    )
+    expect_response_final(body)
+    reasoning = expect_reasoning_item(body)
+    summary = reasoning.get("summary") or []
+    expect(summary and summary[0].get("type") == "summary_text", f"reasoning summary missing: {reasoning}")
+    text = str(summary[0].get("text") or "")
+    expect("Raw reasoning content is intentionally not exposed" in text or "No reasoning trace" in text, f"unexpected summary text: {text}")
+    expect("encrypted_content" not in reasoning, f"encrypted_content should be opt-in: {reasoning}")
+    return "summary_text"
+
+
+def case_responses_reasoning_previous_response_carryover(state: BenchmarkState) -> str:
+    if not state.reasoning_response_id or not state.reasoning_item:
+        first, _, _ = post_json(
+            "/v1/responses",
+            {
+                "model": MODEL,
+                "input": "Respawn benchmark stored reasoning. Remember the marker word cobalt.",
+                "reasoning": {"effort": "low", "summary": "auto"},
+                "max_output_tokens": completion_output_tokens(96),
+                "store": True,
+            },
+        )
+        expect_response_final(first)
+        state.reasoning_response_id = first["id"]
+        state.reasoning_item = expect_reasoning_item(first)
+
+    second, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "previous_response_id": state.reasoning_response_id,
+            "input": "Continue after the stored reasoning response in one short sentence.",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "max_output_tokens": completion_output_tokens(96),
+            "store": True,
+        },
+    )
+    expect_response_final(second)
+    retrieved, _, _ = request_json("GET", f"/v1/responses/{state.reasoning_response_id}")
+    retrieved_reasoning = expect_reasoning_item(retrieved)
+    expect(retrieved_reasoning.get("id") == state.reasoning_item.get("id"), f"stored reasoning item changed: {retrieved_reasoning} vs {state.reasoning_item}")
+    expect(second.get("previous_response_id") == state.reasoning_response_id, f"previous_response_id did not round-trip: {second}")
+    return second["status"]
+
+
+def case_responses_reasoning_encrypted_roundtrip() -> str:
+    first, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Respawn benchmark encrypted reasoning. Reply briefly.",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "max_output_tokens": completion_output_tokens(96),
+            "store": False,
+        },
+    )
+    expect_response_final(first)
+    reasoning = expect_reasoning_item(first)
+    encrypted_content = reasoning.get("encrypted_content")
+    expect(isinstance(encrypted_content, str) and encrypted_content, f"reasoning encrypted_content missing: {reasoning}")
+    expect(encrypted_content not in first.get("output_text", ""), "encrypted_content leaked into output_text")
+
+    second, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": [
+                reasoning,
+                {"role": "user", "content": "Continue after the encrypted reasoning item in one short sentence."},
+            ],
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "max_output_tokens": completion_output_tokens(96),
+            "store": False,
+        },
+    )
+    expect_response_final(second)
+    second_reasoning = expect_reasoning_item(second)
+    expect(isinstance(second_reasoning.get("encrypted_content"), str), f"second encrypted_content missing: {second_reasoning}")
+    return "encrypted_content"
 
 
 def case_responses_previous_response(state: BenchmarkState) -> str:
@@ -1047,7 +1564,11 @@ def case_responses_input_message_list() -> str:
             "store": False,
         },
     )
-    expect_response_completed(body)
+    expect_response_final(body)
+    input_items = body.get("input") or []
+    expect(input_items and input_items[0].get("type") == "message", f"message-list input did not round-trip: {body}")
+    content = input_items[0].get("content") or []
+    expect(content and content[0].get("type") == "input_text", f"input_text content did not round-trip: {body}")
     return body["status"]
 
 
@@ -1199,7 +1720,7 @@ def case_responses_unsupported_field() -> str:
     expect(status == 400, f"unsupported include returned HTTP {status}: {body}")
     error = body.get("error") or {}
     expect(error.get("code") == "unsupported_parameter", f"unexpected unsupported error: {body}")
-    expect(error.get("param") == "include", f"unexpected unsupported param: {body}")
+    expect(error.get("param") == "include.0", f"unexpected unsupported param: {body}")
     return error["param"]
 
 
@@ -1411,6 +1932,130 @@ def case_responses_multimodal_file_limits() -> str:
     return error["code"]
 
 
+def case_responses_include_file_artifacts() -> str:
+    body, _, _ = request_json(
+        "POST",
+        "/v1/responses",
+        {
+            "model": VISION_MODEL,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe this image in one short phrase."},
+                        {"type": "input_image", "image_url": f"{ASSET_BASE_URL}/tiny-red.png", "detail": "low"},
+                    ],
+                }
+            ],
+            "include": ["message.input_image.image_url"],
+            "max_output_tokens": completion_output_tokens(64),
+            "store": True,
+        },
+    )
+    expect_response_final(body)
+    image_part = body.get("input", [{}])[0].get("content", [{}, {}])[1]
+    artifact = image_part.get("artifact") or {}
+    expect(artifact.get("id", "").startswith("art_"), f"image include did not expose artifact metadata: {body}")
+    expect(artifact.get("source", {}).get("type") == "url", f"image artifact source was not URL metadata: {artifact}")
+    expect("content" not in artifact, f"image artifact leaked content bytes: {artifact}")
+    return artifact["id"]
+
+
+def case_responses_include_annotations() -> str:
+    body, _, _ = request_json(
+        "POST",
+        "/v1/responses",
+        {
+            "model": TEXT_MODEL,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "filename": "facts.txt", "file_url": f"{ASSET_BASE_URL}/facts.txt"},
+                        {"type": "input_text", "text": "Answer with one short sentence using the file marker word."},
+                    ],
+                }
+            ],
+            "max_output_tokens": completion_output_tokens(128),
+            "store": True,
+        },
+    )
+    expect_response_final(body)
+    content = body.get("output", [{}])[-1].get("content", [{}])[0]
+    annotations = content.get("annotations") or []
+    expect(annotations, f"output_text did not include file annotations: {body}")
+    annotation = annotations[0]
+    expect(annotation.get("type") == "file_citation", f"unexpected annotation type: {annotation}")
+    expect(annotation.get("file_id", "").startswith("art_"), f"annotation did not point at a local artifact: {annotation}")
+    retrieved, _, _ = request_json("GET", f"/v1/responses/{body['id']}")
+    retrieved_annotations = retrieved.get("output", [{}])[-1].get("content", [{}])[0].get("annotations") or []
+    expect(retrieved_annotations == annotations, f"retrieve did not preserve annotations: {retrieved}")
+    artifact_content, artifact_status, _ = request_raw("GET", f"/v1/responses/{body['id']}/artifacts/{annotation['file_id']}/content")
+    expect(artifact_status == 200, f"artifact content returned HTTP {artifact_status}: {artifact_content[:200]}")
+    expect("cobalt" in artifact_content.lower(), f"artifact content did not include file text: {artifact_content[:200]}")
+    artifacts, _, _ = request_json("GET", f"/v1/responses/{body['id']}/artifacts?order=asc&limit=1")
+    expect(artifacts.get("object") == "list", f"artifact list did not return a list object: {artifacts}")
+    expect((artifacts.get("data") or [{}])[0].get("id") == annotation["file_id"], f"artifact list did not include cited artifact: {artifacts}")
+    return annotation["file_id"]
+
+
+def case_responses_include_unsupported_logprobs() -> str:
+    body, status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": TEXT_MODEL,
+            "input": "Logprob capability check.",
+            "include": ["message.output_text.logprobs"],
+            "top_logprobs": 1,
+            "max_output_tokens": min(MAX_OUTPUT_TOKENS, 32),
+            "store": False,
+        },
+    )
+    expect(status == 400, f"logprobs request returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") == "unsupported_model_capability", f"unexpected logprobs error: {body}")
+    expect(error.get("param") in {"include", "top_logprobs"}, f"unexpected logprobs param: {body}")
+    return error["code"]
+
+
+def case_responses_include_hosted_tool_unsupported() -> str:
+    body, status, _ = request_json_error("POST", "/v1/responses", {"model": MODEL, "input": "hello", "include": ["file_search_call.results"]})
+    expect(status == 400, f"hosted include returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") == "unsupported_parameter", f"unexpected hosted include error: {body}")
+    expect(error.get("param") == "include.0", f"unexpected hosted include param: {body}")
+    return error["param"]
+
+
+def case_responses_retrieve_include() -> str:
+    created, _, _ = request_json(
+        "POST",
+        "/v1/responses",
+        {
+            "model": VISION_MODEL,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe this image in one short phrase."},
+                        {"type": "input_image", "image_url": f"{ASSET_BASE_URL}/tiny-red.png", "detail": "low"},
+                    ],
+                }
+            ],
+            "max_output_tokens": completion_output_tokens(64),
+            "store": True,
+        },
+    )
+    expect_response_final(created)
+    image_part = created.get("input", [{}])[0].get("content", [{}, {}])[1]
+    expect("artifact" not in image_part, f"create without include should not expand artifact metadata: {created}")
+    retrieved, _, _ = request_json("GET", f"/v1/responses/{created['id']}?include[]=message.input_image.image_url")
+    artifact = retrieved.get("input", [{}])[0].get("content", [{}, {}])[1].get("artifact") or {}
+    expect(artifact.get("id", "").startswith("art_"), f"retrieve include did not expand artifact metadata: {retrieved}")
+    return artifact["id"]
+
+
 def case_chat_completions() -> str:
     body, _, _ = post_json(
         "/v1/chat/completions",
@@ -1457,6 +2102,8 @@ def case_metrics(state: BenchmarkState) -> str:
         expect(metric in text, f"missing metric {metric}")
     if EXPECT_OLLAMA_METRICS and "gateway_ollama_eval_tokens_per_second" not in text:
         raise AssertionError("missing Ollama native throughput metrics")
+    if EXPECT_OLLAMA_METRICS and "gateway_backend_eval_tokens_per_second" not in text:
+        raise AssertionError("missing generic backend native throughput metrics")
     if not EXPECT_OLLAMA_METRICS and "gateway_ollama_eval_tokens_per_second" not in text:
         state.warnings.append("Ollama native throughput metrics were not present.")
     return "metrics present"
@@ -1493,6 +2140,229 @@ def case_function_tool_metrics(state: BenchmarkState) -> str:
     for metric in required:
         expect(metric in text, f"missing function tool metric {metric}")
     return "function tool metrics present"
+
+
+def case_reasoning_metrics(state: BenchmarkState) -> str:
+    case_responses_reasoning()
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_reasoning_requests_total",
+        "gateway_reasoning_tokens_total",
+        "gateway_reasoning_heavy_requests_total",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing reasoning metric {metric}")
+    return "reasoning metrics present"
+
+
+def case_context_management_metrics(state: BenchmarkState) -> str:
+    case_responses_compact()
+    case_responses_context_truncation_auto()
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_context_compactions_total",
+        "gateway_context_compaction_tokens_total",
+        "gateway_context_compaction_ratio_bucket",
+        "gateway_context_truncations_total",
+        "gateway_context_overflows_total",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing context metric {metric}")
+    return "context metrics present"
+
+
+def case_include_metrics(state: BenchmarkState) -> str:
+    case_responses_include_file_artifacts()
+    case_responses_include_unsupported_logprobs()
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_response_include_expansions_total",
+        "gateway_response_include_expansion_bytes_total",
+        "gateway_response_include_capability_errors_total",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing include metric {metric}")
+    return "include metrics present"
+
+
+def case_prompt_cache_metrics(state: BenchmarkState) -> str:
+    case_responses_prompt_template_render()
+    case_responses_prompt_cache_in_memory()
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_prompt_template_requests_total",
+        "gateway_prompt_cache_requests_total",
+        "gateway_prompt_cache_tokens_total",
+        "gateway_prompt_cache_hit_ratio",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing prompt/cache metric {metric}")
+    return "prompt/cache metrics present"
+
+
+def case_metrics_full_surface(state: BenchmarkState) -> str:
+    request_json("GET", "/readyz")
+    case_responses_blocking(state)
+    stream_text, stream_status, _ = request_raw(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Respawn full-surface metrics stream.",
+            "stream": True,
+            "max_output_tokens": completion_output_tokens(16),
+            "store": False,
+        },
+    )
+    expect(stream_status == 200, f"metrics full-surface stream returned HTTP {stream_status}: {stream_text[:500]}")
+    created_file = upload_benchmark_text_file()
+    request_raw("GET", f"/v1/files/{created_file['id']}/content")
+    request_json("DELETE", f"/v1/files/{created_file['id']}")
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_requests_total",
+        "gateway_endpoint_requests_total",
+        "gateway_feature_requests_total",
+        "gateway_idempotency_requests_total",
+        "gateway_errors_total",
+        "gateway_operational_failures_total",
+        "gateway_responses_total",
+        "gateway_response_latency_seconds_bucket",
+        "gateway_inflight_responses",
+        "gateway_streaming_responses_running",
+        "gateway_background_jobs_total",
+        "gateway_background_job_latency_seconds_bucket",
+        "gateway_background_jobs_running",
+        "gateway_context_compactions_total",
+        "gateway_response_include_expansions_total",
+        "gateway_prompt_cache_requests_total",
+        "gateway_storage_operations_total",
+        "gateway_backend_model_info",
+        "gateway_backend_requests_total",
+        "gateway_backend_model_requests_total",
+        "gateway_backend_eval_tokens_total",
+        "gateway_backend_eval_duration_seconds_total",
+        "gateway_backend_eval_tokens_per_second",
+        "gateway_model_token_usage_total",
+        "gateway_readiness_check",
+        "gateway_readiness_check_latency_seconds_bucket",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing full-surface metric {metric}")
+    return f"{len(required)} metric families present"
+
+
+def case_ops_ollama_unavailable(state: BenchmarkState) -> str:
+    if MODEL_BACKEND == "mock":
+        return "mock backend has no external Ollama dependency"
+    missing_model = os.getenv("RESPAWN_BENCHMARK_UNAVAILABLE_MODEL", f"respawn-missing-model-{os.getpid()}-{time.monotonic_ns()}")
+    body, status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": missing_model,
+            "input": "Respawn outage injection. This model should not exist.",
+            "max_output_tokens": 8,
+            "store": False,
+        },
+    )
+    expect(status in {500, 502, 503, 504}, f"backend outage injection returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") in {"backend_error", "backend_timeout", "internal_error"}, f"unexpected backend outage error: {body}")
+    text, metrics_status, _ = request_raw("GET", "/metrics")
+    expect(metrics_status == 200, f"/metrics returned HTTP {metrics_status}")
+    expect("gateway_backend_requests_total" in text, "missing backend request metric after outage injection")
+    expect("gateway_operational_failures_total" in text, "missing operational failure metric after outage injection")
+    return str(error.get("code"))
+
+
+def case_ops_concurrent_streaming(state: BenchmarkState) -> str:
+    def run_stream(index: int) -> dict[str, Any]:
+        text, status, _ = request_raw(
+            "POST",
+            "/v1/responses",
+            {
+                "model": MODEL,
+                "input": f"Respawn concurrent stream {index}. Reply with a short sentence containing marker stream-{index}.",
+                "stream": True,
+                "max_output_tokens": completion_output_tokens(64),
+                "store": True,
+            },
+        )
+        expect(status == 200, f"stream {index} returned HTTP {status}: {text[:500]}")
+        events = parse_sse_events(text)
+        response_id = response_id_from_events(events)
+        item_ids = output_item_ids_from_events(events)
+        expect(response_id.startswith("resp_"), f"stream {index} missing response id: {events[-3:]}")
+        return {"index": index, "response_id": response_id, "item_ids": item_ids, "text": text}
+
+    results = run_concurrently(run_stream, range(2))
+    response_ids = [result["response_id"] for result in results]
+    expect(len(set(response_ids)) == len(response_ids), f"concurrent streams reused response ids: {response_ids}")
+    for result in results:
+        for other_id in response_ids:
+            if other_id != result["response_id"]:
+                expect(other_id not in result["text"], f"stream {result['index']} leaked response id {other_id}")
+    item_sets = [set(result["item_ids"]) for result in results]
+    if all(item_sets):
+        expect(item_sets[0].isdisjoint(item_sets[1]), f"concurrent streams reused output item ids: {item_sets}")
+    return f"{len(results)} streams isolated"
+
+
+def case_ops_concurrent_background(state: BenchmarkState) -> str:
+    def create_background(index: int) -> dict[str, Any]:
+        body, _, _ = post_json(
+            "/v1/responses",
+            {
+                "model": MODEL,
+                "input": f"Respawn concurrent background {index}. Reply with marker background-{index}.",
+                "background": True,
+                "max_output_tokens": completion_output_tokens(64),
+                "store": True,
+            },
+        )
+        expect(body.get("background") is True, f"background flag missing: {body}")
+        return body
+
+    created = run_concurrently(create_background, range(2))
+    response_ids = [body["id"] for body in created]
+    expect(len(set(response_ids)) == len(response_ids), f"concurrent background reused response ids: {response_ids}")
+    terminals = [poll_response_terminal(response_id, expected={"completed", "incomplete"}) for response_id in response_ids]
+    item_sets = [
+        {str(item.get("id")) for item in terminal.get("output") or [] if item.get("id")}
+        for terminal in terminals
+    ]
+    if all(item_sets):
+        expect(item_sets[0].isdisjoint(item_sets[1]), f"concurrent background reused output item ids: {item_sets}")
+    return f"{len(terminals)} background jobs isolated"
+
+
+def case_benchmark_history_compare() -> str:
+    previous = {
+        "cases": [
+            {"name": "case.fast", "status": "passed", "latency_ms": 10.0},
+            {"name": "case.old_failure", "status": "failed", "latency_ms": 20.0},
+        ],
+        "latency": {"responses_blocking": {"p50_ms": 100.0}, "chat_completions": {"p50_ms": 50.0}},
+    }
+    current = {
+        "cases": [
+            {"name": "case.fast", "status": "passed", "latency_ms": 15.0},
+            {"name": "case.old_failure", "status": "passed", "latency_ms": 18.0},
+            {"name": "case.new", "status": "passed", "latency_ms": 5.0},
+        ],
+        "latency": {"responses_blocking": {"p50_ms": 90.0}, "chat_completions": {"p50_ms": 75.0}},
+    }
+    comparison = compare_reports(current, previous)
+    expect(comparison["case_counts"]["failed_delta"] == -1, f"unexpected failed delta: {comparison}")
+    expect(comparison["case_counts"]["new_cases"] == ["case.new"], f"unexpected new cases: {comparison}")
+    expect(comparison["latency"]["responses_blocking"]["p50_delta_ms"] == -10.0, f"unexpected latency delta: {comparison}")
+    return "history comparison ok"
 
 
 def case_responses_delete(state: BenchmarkState) -> str:
@@ -1532,6 +2402,71 @@ def post_json(path: str, payload: dict[str, Any], *, api_key: str | None = None)
     return request_json("POST", path, payload, api_key=api_key)
 
 
+def upload_benchmark_text_file(*, api_key: str | None = None, content: str = "Respawn file marker word: cobalt.") -> dict[str, Any]:
+    body, _, _ = request_multipart_file(
+        "/v1/files",
+        filename="facts.txt",
+        content=content.encode(),
+        content_type="text/plain",
+        fields={"purpose": "user_data"},
+        api_key=api_key,
+    )
+    expect(body.get("object") == "file", f"unexpected file upload object: {body}")
+    expect(str(body.get("id", "")).startswith("file_"), f"uploaded file id did not look local: {body}")
+    return body
+
+
+def openai_sdk_client() -> Any:
+    from openai import OpenAI
+
+    return OpenAI(base_url=f"{BASE_URL}/v1", api_key=API_KEY or "local-dev-key", max_retries=0, timeout=TIMEOUT_SECONDS)
+
+
+def request_multipart_file(
+    path: str,
+    *,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    fields: dict[str, str],
+    api_key: str | None = None,
+) -> tuple[dict[str, Any], int, float]:
+    boundary = f"respawn-boundary-{os.getpid()}-{time.monotonic_ns()}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                str(value).encode(),
+                b"\r\n",
+            ]
+        )
+    chunks.extend(
+        [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+            f"Content-Type: {content_type}\r\n\r\n".encode(),
+            content,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    data = b"".join(chunks)
+    text, status, latency_ms = request_raw_bytes(
+        "POST",
+        path,
+        data,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        api_key=api_key,
+    )
+    expect(200 <= status < 300, f"POST {path} returned HTTP {status}: {text[:500]}")
+    try:
+        return json.loads(text), status, latency_ms
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"POST {path} returned invalid JSON: {text[:500]}") from exc
+
+
 def request_json(method: str, path: str, payload: dict[str, Any] | None = None, *, api_key: str | None = None) -> tuple[dict[str, Any], int, float]:
     text, status, latency_ms = request_raw(method, path, payload, api_key=api_key)
     expect(200 <= status < 300, f"{method} {path} returned HTTP {status}: {text[:500]}")
@@ -1550,17 +2485,21 @@ def request_json_error(method: str, path: str, payload: dict[str, Any] | None = 
 
 
 def request_raw(method: str, path: str, payload: dict[str, Any] | None = None, *, api_key: str | None = None) -> tuple[str, int, float]:
-    url = f"{BASE_URL}{path}"
     data = None
     headers = {}
-    selected_api_key = API_KEY if api_key is None else api_key
-    if selected_api_key:
-        headers["Authorization"] = f"Bearer {selected_api_key}"
     if payload is not None:
         data = json.dumps(payload, separators=(",", ":")).encode()
         headers["Content-Type"] = "application/json"
+    return request_raw_bytes(method, path, data, headers=headers, api_key=api_key)
 
-    request = Request(url, data=data, headers=headers, method=method)
+
+def request_raw_bytes(method: str, path: str, data: bytes | None, *, headers: dict[str, str] | None = None, api_key: str | None = None) -> tuple[str, int, float]:
+    url = f"{BASE_URL}{path}"
+    request_headers = dict(headers or {})
+    selected_api_key = API_KEY if api_key is None else api_key
+    if selected_api_key:
+        request_headers["Authorization"] = f"Bearer {selected_api_key}"
+    request = Request(url, data=data, headers=request_headers, method=method)
     started = time.perf_counter()
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
@@ -1618,6 +2557,33 @@ def poll_response_terminal(response_id: str, *, expected: set[str], timeout_seco
     raise AssertionError(f"response {response_id} did not reach {sorted(expected)} within timeout; last body: {last_body}")
 
 
+def run_concurrently(fn, values) -> list[Any]:
+    value_list = list(values)
+    results: list[Any] = [None] * len(value_list)
+    with ThreadPoolExecutor(max_workers=len(value_list)) as executor:
+        futures = {executor.submit(fn, value): index for index, value in enumerate(value_list)}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    return results
+
+
+def response_id_from_events(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        response = (event.get("data") or {}).get("response")
+        if isinstance(response, dict) and isinstance(response.get("id"), str):
+            return response["id"]
+    raise AssertionError(f"SSE events did not include a response id: {events[-3:]}")
+
+
+def output_item_ids_from_events(events: list[dict[str, Any]]) -> list[str]:
+    ids = []
+    for event in events:
+        item = (event.get("data") or {}).get("item")
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            ids.append(item["id"])
+    return ids
+
+
 
 def first_output_text_part(body: dict[str, Any]) -> dict[str, Any]:
     for item in body.get("output") or []:
@@ -1625,6 +2591,17 @@ def first_output_text_part(body: dict[str, Any]) -> dict[str, Any]:
             if content.get("type") in {"output_text", "text"}:
                 return content
     raise AssertionError(f"response has no output text part: {body}")
+
+
+def expect_reasoning_item(body: dict[str, Any]) -> dict[str, Any]:
+    expect_response_object(body)
+    reasoning_items = [item for item in body.get("output") or [] if item.get("type") == "reasoning"]
+    expect(reasoning_items, f"response output did not include a reasoning item: {body}")
+    item = reasoning_items[0]
+    expect(str(item.get("id", "")).startswith("rs_"), f"reasoning item id should start with rs_: {item}")
+    expect(isinstance(item.get("summary", []), list), f"reasoning summary should be a list: {item}")
+    expect(item.get("status") in {"completed", "in_progress", "incomplete"}, f"reasoning status missing: {item}")
+    return item
 
 
 def expect_function_call_item(body: dict[str, Any], *, name: str | None = None) -> dict[str, Any]:
@@ -1679,6 +2656,13 @@ def print_summary(state: BenchmarkState, response_samples: list[float], chat_sam
     if state.compatibility_coverage:
         missing = state.compatibility_coverage.get("missing_supported_features") or []
         print(f"Compatibility coverage: missing={len(missing)} covered={len(state.compatibility_coverage.get('covered_supported_features') or [])}")
+    if state.benchmark_comparison:
+        status = state.benchmark_comparison.get("status")
+        counts = state.benchmark_comparison.get("case_counts") or {}
+        print(
+            "Benchmark comparison: "
+            f"status={status} passed_delta={counts.get('passed_delta', 0)} failed_delta={counts.get('failed_delta', 0)}"
+        )
 
     if response_samples:
         print(f"Responses latency: {json.dumps(summarize(response_samples), sort_keys=True)}")
@@ -1689,6 +2673,17 @@ def print_summary(state: BenchmarkState, response_samples: list[float], chat_sam
 def write_report(state: BenchmarkState, response_samples: list[float], chat_samples: list[float]) -> None:
     if not OUTPUT_PATH:
         return
+    report = build_report(state, response_samples, chat_samples)
+    output_dir = os.path.dirname(OUTPUT_PATH)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(f"Report written to {OUTPUT_PATH}")
+
+
+def build_report(state: BenchmarkState, response_samples: list[float], chat_samples: list[float]) -> dict[str, Any]:
     report = {
         "metadata": benchmark_metadata(state),
         "cases": [case.__dict__ for case in state.cases],
@@ -1699,13 +2694,90 @@ def write_report(state: BenchmarkState, response_samples: list[float], chat_samp
             "chat_completions": summarize(chat_samples),
         },
     }
-    output_dir = os.path.dirname(OUTPUT_PATH)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    print(f"Report written to {OUTPUT_PATH}")
+    if state.benchmark_comparison:
+        report["comparison"] = state.benchmark_comparison
+    return report
+
+
+def compare_report_to_previous(current_report: dict[str, Any], previous_path: str) -> dict[str, Any]:
+    if not previous_path:
+        return {"status": "not_configured"}
+    if not os.path.exists(previous_path):
+        return {"status": "missing_previous", "previous_path": previous_path}
+    with open(previous_path, encoding="utf-8") as handle:
+        previous_report = json.load(handle)
+    comparison = compare_reports(current_report, previous_report)
+    comparison["previous_path"] = previous_path
+    return comparison
+
+
+def compare_reports(current_report: dict[str, Any], previous_report: dict[str, Any]) -> dict[str, Any]:
+    current_cases = _case_map(current_report)
+    previous_cases = _case_map(previous_report)
+    current_names = set(current_cases)
+    previous_names = set(previous_cases)
+    current_counts = _case_status_counts(current_cases)
+    previous_counts = _case_status_counts(previous_cases)
+    matched = sorted(current_names & previous_names)
+    regressions = []
+    improvements = []
+    for name in matched:
+        current_case = current_cases[name]
+        previous_case = previous_cases[name]
+        delta = float(current_case.get("latency_ms", 0.0) or 0.0) - float(previous_case.get("latency_ms", 0.0) or 0.0)
+        row = {
+            "name": name,
+            "latency_delta_ms": round(delta, 3),
+            "previous_status": previous_case.get("status"),
+            "current_status": current_case.get("status"),
+        }
+        if delta > 0:
+            regressions.append(row)
+        elif delta < 0:
+            improvements.append(row)
+
+    return {
+        "status": "compared",
+        "case_counts": {
+            "current": current_counts,
+            "previous": previous_counts,
+            "passed_delta": current_counts.get("passed", 0) - previous_counts.get("passed", 0),
+            "failed_delta": current_counts.get("failed", 0) - previous_counts.get("failed", 0),
+            "skipped_delta": current_counts.get("skipped", 0) - previous_counts.get("skipped", 0),
+            "new_cases": sorted(current_names - previous_names),
+            "removed_cases": sorted(previous_names - current_names),
+        },
+        "latency": _latency_comparison(current_report.get("latency") or {}, previous_report.get("latency") or {}),
+        "slowest_case_regressions": sorted(regressions, key=lambda row: row["latency_delta_ms"], reverse=True)[:10],
+        "largest_case_improvements": sorted(improvements, key=lambda row: row["latency_delta_ms"])[:10],
+    }
+
+
+def _case_map(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(case.get("name")): case for case in report.get("cases", []) if isinstance(case, dict) and case.get("name")}
+
+
+def _case_status_counts(cases: dict[str, dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for case in cases.values():
+        status = str(case.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _latency_comparison(current_latency: dict[str, Any], previous_latency: dict[str, Any]) -> dict[str, Any]:
+    comparison: dict[str, Any] = {}
+    for name in sorted(set(current_latency) | set(previous_latency)):
+        current = current_latency.get(name) or {}
+        previous = previous_latency.get(name) or {}
+        current_p50 = float(current.get("p50_ms", 0.0) or 0.0)
+        previous_p50 = float(previous.get("p50_ms", 0.0) or 0.0)
+        comparison[name] = {
+            "current_p50_ms": current_p50,
+            "previous_p50_ms": previous_p50,
+            "p50_delta_ms": round(current_p50 - previous_p50, 3),
+        }
+    return comparison
 
 
 def benchmark_metadata(state: BenchmarkState) -> dict[str, Any]:

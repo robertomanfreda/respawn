@@ -5,24 +5,25 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from src.config import Settings
 from src.observability.metrics import FUNCTION_TOOL_UNSUPPORTED
 from src.schemas.errors import OpenAIError
 from src.schemas.responses import ResponseRequest
+from src.services.context_management import validate_compaction_item, validate_context_management
+from src.services.include_expansions import REASONING_ENCRYPTED_CONTENT, validate_include_values
+from src.services.model_capabilities import reasoning_efforts_for_model
 from src.services.response_history_builder import content_to_text
+from src.services.reasoning_summaries import DeterministicReasoningSummaryProvider, ReasoningSummaryProvider, estimate_text_tokens
 
 
 UNSUPPORTED_FIELDS = {
-    "context_management": "Context management is not supported yet.",
-    "include": "Include expansions are not supported yet.",
-    "prompt": "Hosted prompt templates are not supported yet.",
-    "top_logprobs": "Top logprobs are not supported yet.",
     "user": "The deprecated user field is not supported by Respawn.",
 }
 
 TEXT_CONTENT_TYPES = {"input_text", "output_text", "text"}
 MULTIMODAL_CONTENT_TYPES = {"input_image", "input_file"}
 FUNCTION_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
+SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 SUPPORTED_REASONING_SUMMARIES = {"auto", "concise", "detailed"}
 SUPPORTED_PROMPT_CACHE_RETENTIONS = {"in_memory", "24h"}
 SUPPORTED_SERVICE_TIERS = {"auto", "default", "flex", "scale", "priority"}
@@ -38,9 +39,9 @@ def validate_text_responses_request(request: ResponseRequest) -> None:
     if request.background and request.store is False:
         raise OpenAIError("Background mode requires store=true.", param="store", code="invalid_request")
     _validate_stream_options(request)
-    if request.truncation == "auto":
-        _unsupported("truncation", "Automatic truncation is not supported yet.")
+    validate_context_management(request.context_management)
 
+    validate_include_values(request.include)
     for field, message in UNSUPPORTED_FIELDS.items():
         value = getattr(request, field)
         if value not in (None, [], {}):
@@ -54,6 +55,28 @@ def validate_text_responses_request(request: ResponseRequest) -> None:
 
     validate_text_input(request.input)
     _validate_text_format(normalized_text_config(request))
+
+
+def validate_reasoning_capabilities(request: ResponseRequest, *, model: str, settings: Settings) -> None:
+    if request.reasoning is None:
+        return
+    efforts = reasoning_efforts_for_model(model, settings)
+    if not efforts:
+        raise OpenAIError(
+            f"Model '{model}' is not configured with the reasoning capability.",
+            status_code=400,
+            param="model",
+            code="unsupported_model_capability",
+        )
+
+    effort = request.reasoning.get("effort") if isinstance(request.reasoning, dict) else None
+    if effort is not None and effort not in efforts:
+        raise OpenAIError(
+            f"Reasoning effort '{effort}' is not supported by model '{model}'.",
+            status_code=400,
+            param="reasoning.effort",
+            code="unsupported_model_capability",
+        )
 
 
 def validate_text_input(input_value: str | list[dict[str, Any]] | None, *, param: str = "input") -> None:
@@ -72,6 +95,10 @@ def validate_text_input(input_value: str | list[dict[str, Any]] | None, *, param
             _validate_text_content(item.get("content", ""), param=f"{param}.{index}.content")
             continue
         if item_type == "reasoning":
+            _validate_reasoning_item(item, param=f"{param}.{index}")
+            continue
+        if item_type == "compaction":
+            validate_compaction_item(item, param=f"{param}.{index}")
             continue
         if item_type == "function_call":
             _validate_function_call_item(item, param=f"{param}.{index}")
@@ -109,14 +136,9 @@ def input_items_from_request(request_json: dict[str, Any]) -> list[dict[str, Any
         elif item_type == "tool_result":
             _unsupported(f"input.{index}.type", "Legacy tool_result input items are not supported by Respawn.")
         elif item_type == "reasoning":
-            items.append(
-                {
-                    "id": item_id,
-                    "type": "reasoning",
-                    "summary": item.get("summary", []),
-                    "status": item.get("status", "completed"),
-                }
-            )
+            items.append(_reasoning_item(item, fallback_id=item_id))
+        elif item_type == "compaction":
+            items.append(_compaction_item(item, fallback_id=item_id))
     return items
 
 
@@ -288,7 +310,18 @@ def reasoning_summary_requested(request: ResponseRequest) -> bool:
     return isinstance(reasoning, dict) and reasoning.get("summary") in SUPPORTED_REASONING_SUMMARIES
 
 
-def reasoning_output_item(item_id: str, reasoning_text: str, request: ResponseRequest) -> dict[str, Any]:
+def reasoning_encrypted_content_requested(request: ResponseRequest) -> bool:
+    return REASONING_ENCRYPTED_CONTENT in request.include
+
+
+def reasoning_output_item(
+    item_id: str,
+    reasoning_text: str,
+    request: ResponseRequest,
+    *,
+    encrypted_content: str | None = None,
+    summary_provider: ReasoningSummaryProvider | None = None,
+) -> dict[str, Any]:
     item: dict[str, Any] = {
         "id": item_id,
         "type": "reasoning",
@@ -296,19 +329,37 @@ def reasoning_output_item(item_id: str, reasoning_text: str, request: ResponseRe
         "status": "completed",
     }
     if reasoning_summary_requested(request):
-        item["summary"] = [{"type": "summary_text", "text": reasoning_summary(reasoning_text)}]
+        provider = summary_provider or DeterministicReasoningSummaryProvider()
+        item["summary"] = [{"type": "summary_text", "text": provider.summarize(reasoning_text, mode=(request.reasoning or {}).get("summary"))}]
+    if encrypted_content is not None:
+        item["encrypted_content"] = encrypted_content
     return item
 
 
 def reasoning_summary(reasoning_text: str) -> str:
-    tokens = estimate_text_tokens(reasoning_text)
-    if tokens <= 0:
-        return "No reasoning trace was returned by the local backend."
-    return f"Local backend returned a reasoning trace before the final answer. Estimated reasoning tokens: {tokens}. Raw reasoning content is intentionally not exposed by Respawn."
+    return DeterministicReasoningSummaryProvider().summarize(reasoning_text)
 
 
-def estimate_text_tokens(text: str) -> int:
-    return _estimate_tokens(text)
+def _reasoning_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, Any]:
+    normalized = {
+        "id": str(item.get("id") or fallback_id),
+        "type": "reasoning",
+        "summary": item.get("summary", []),
+        "status": item.get("status", "completed"),
+    }
+    if item.get("encrypted_content") is not None:
+        normalized["encrypted_content"] = item.get("encrypted_content")
+    return normalized
+
+
+def _compaction_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, Any]:
+    normalized = {
+        "id": str(item.get("id") or fallback_id),
+        "type": "compaction",
+        "encrypted_content": str(item.get("encrypted_content") or ""),
+        "status": item.get("status", "completed"),
+    }
+    return normalized
 
 
 def _message_item(item_id: str, role: str, content: Any) -> dict[str, Any]:
@@ -544,6 +595,27 @@ def _validate_function_call_output_item(item: dict[str, Any], *, param: str) -> 
         raise OpenAIError("function_call_output input items require call_id.", param=f"{param}.call_id")
     if "output" not in item:
         raise OpenAIError("function_call_output input items require output.", param=f"{param}.output")
+
+
+def _validate_reasoning_item(item: dict[str, Any], *, param: str) -> None:
+    summary = item.get("summary", [])
+    if summary is not None and not isinstance(summary, list):
+        raise OpenAIError("reasoning summary must be a list.", param=f"{param}.summary")
+    for index, part in enumerate(summary or []):
+        if not isinstance(part, dict):
+            raise OpenAIError("reasoning summary entries must be objects.", param=f"{param}.summary.{index}")
+        if part.get("type") != "summary_text":
+            _unsupported(f"{param}.summary.{index}.type", f"Reasoning summary type '{part.get('type')}' is not supported.")
+        if not isinstance(part.get("text"), str):
+            raise OpenAIError("reasoning summary text must be a string.", param=f"{param}.summary.{index}.text")
+
+    encrypted_content = item.get("encrypted_content")
+    if encrypted_content is not None and not isinstance(encrypted_content, str):
+        raise OpenAIError("reasoning encrypted_content must be a string.", param=f"{param}.encrypted_content")
+
+    unsupported_keys = sorted(set(item) - {"id", "type", "summary", "encrypted_content", "status"})
+    if unsupported_keys:
+        _unsupported(f"{param}.{unsupported_keys[0]}", f"Reasoning item field '{unsupported_keys[0]}' is not supported.")
 
 
 def _validate_tool_name(name: Any, *, param: str) -> None:

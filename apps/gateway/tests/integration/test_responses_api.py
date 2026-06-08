@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from src.config import get_settings
 from src.main import create_app
+from src.services.context_management import unseal_compaction_content
+from src.services.reasoning_encryption import unseal_reasoning_content
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "incomplete"}
@@ -29,6 +31,15 @@ TINY_PDF_BYTES = (
 
 def _data_url(mime_type: str, payload_base64: str) -> str:
     return f"data:{mime_type};base64,{payload_base64}"
+
+
+def _upload_text_file(client, *, filename: str = "facts.txt", text: str = "Respawn file marker word: cobalt.", headers: dict[str, str] | None = None):
+    return client.post(
+        "/v1/files",
+        headers=headers or {},
+        data={"purpose": "user_data"},
+        files={"file": (filename, text.encode(), "text/plain")},
+    )
 
 
 def test_list_models(client):
@@ -70,6 +81,55 @@ def test_basic_response_create_and_retrieve(client):
     assert retrieved["output_text"] == "Mock response: hello"
     assert retrieved["text"] == created["text"]
     assert retrieved["store"] is True
+
+
+def test_request_id_headers_are_returned_for_success_and_errors(client):
+    created = client.post("/v1/responses", headers={"x-request-id": "req_user_supplied"}, json={"input": "request id"})
+    missing = client.get("/v1/responses/resp_missing", headers={"x-request-id": "req_missing"})
+
+    assert created.status_code == 200
+    assert created.headers["x-request-id"] == "req_user_supplied"
+    assert missing.status_code == 404
+    assert missing.headers["x-request-id"] == "req_missing"
+    assert missing.json()["error"]["code"] == "not_found"
+
+
+def test_idempotency_key_replays_same_response_and_rejects_conflicts(client):
+    headers = {"Idempotency-Key": "phase14-idempotency"}
+    payload = {"model": "gpt-oss-120b", "input": "idempotent create"}
+
+    first = client.post("/v1/responses", headers=headers, json=payload)
+    replayed = client.post("/v1/responses", headers=headers, json=payload)
+    conflict = client.post("/v1/responses", headers=headers, json={**payload, "input": "changed"})
+    empty_key = client.post("/v1/responses", headers={"Idempotency-Key": ""}, json=payload)
+
+    assert first.status_code == 200
+    assert replayed.status_code == 200
+    assert replayed.headers["x-respawn-idempotent-replay"] == "true"
+    assert replayed.json()["id"] == first.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.headers["x-request-id"].startswith("req_")
+    assert conflict.json()["error"] == {
+        "message": "Idempotency-Key was reused with a different request body.",
+        "type": "invalid_request_error",
+        "param": "Idempotency-Key",
+        "code": "idempotency_conflict",
+    }
+    assert empty_key.status_code == 400
+    assert empty_key.json()["error"]["param"] == "Idempotency-Key"
+
+
+def test_error_schema_for_validation_and_unsupported_parameters(client):
+    validation = client.post("/v1/responses", json={"input": "invalid", "temperature": 3})
+    unsupported = client.post("/v1/responses", json={"input": "unsupported", "user": "legacy-user"})
+
+    assert validation.status_code == 422
+    assert validation.json()["error"]["type"] == "invalid_request_error"
+    assert validation.json()["error"]["param"] == "temperature"
+    assert validation.json()["error"]["code"] == "validation_error"
+    assert unsupported.status_code == 400
+    assert unsupported.json()["error"]["code"] == "unsupported_parameter"
+    assert unsupported.json()["error"]["param"] == "user"
 
 
 def test_response_request_settings_round_trip_through_retrieve(client):
@@ -211,6 +271,210 @@ def test_prompt_cache_reports_cached_tokens(client):
     assert second["usage"]["input_tokens_details"]["cached_tokens"] > 0
     assert counted["input_tokens_details"]["cached_tokens"] > 0
 
+    deleted = client.delete("/v1/responses/prompt_cache", params={"prompt_cache_key": "integration-cache"}).json()
+    reset_counted = client.post("/v1/responses/input_tokens", json={**payload, "input": "shared prefix token token token token token variable-d"}).json()
+
+    assert deleted["object"] == "prompt_cache.deleted"
+    assert deleted["deleted"] > 0
+    assert reset_counted["input_tokens_details"]["cached_tokens"] == 0
+
+
+def test_prompt_template_render_variables_and_versions(client):
+    first_template = client.post(
+        "/v1/responses/prompts",
+        json={
+            "id": "pmpt_integration",
+            "version": "1",
+            "input": "Prompt template marker word {{word}}.",
+            "metadata": {"phase": "12"},
+        },
+    )
+    assert first_template.status_code == 200
+    assert first_template.json()["id"] == "pmpt_integration"
+    assert first_template.json()["version"] == "1"
+
+    second_template = client.post(
+        "/v1/responses/prompts",
+        json={
+            "id": "pmpt_integration",
+            "version": "2",
+            "input": "Prompt template marker word sapphire.",
+        },
+    )
+    assert second_template.status_code == 200
+
+    rendered_v1 = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-oss-120b",
+            "prompt": {"id": "pmpt_integration", "version": "1", "variables": {"word": "topaz"}},
+        },
+    ).json()
+    rendered_latest = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-oss-120b",
+            "prompt": {"id": "pmpt_integration"},
+        },
+    ).json()
+
+    assert "topaz" in rendered_v1["output_text"]
+    assert rendered_v1["input"] == "Prompt template marker word topaz."
+    assert rendered_v1["prompt"]["version"] == "1"
+    assert "sapphire" in rendered_latest["output_text"]
+    assert rendered_latest["prompt"]["version"] == "2"
+
+
+def test_prompt_template_missing_variable_returns_openai_error(client):
+    client.post(
+        "/v1/responses/prompts",
+        json={"id": "pmpt_missing_variable", "version": "1", "input": "Prompt template marker word {{word}}."},
+    )
+
+    response = client.post("/v1/responses", json={"model": "gpt-oss-120b", "prompt": {"id": "pmpt_missing_variable"}})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "missing_prompt_variable"
+    assert body["error"]["param"] == "prompt.variables.word"
+
+
+def test_prompt_template_missing_template_returns_openai_error(client):
+    response = client.post("/v1/responses", json={"model": "gpt-oss-120b", "prompt": {"id": "pmpt_absent"}})
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "not_found"
+    assert body["error"]["param"] == "prompt.id"
+
+
+def test_prompt_template_tenant_isolation(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'prompt_tenant.db'}",
+        AUTH_DISABLED="false",
+        LOCAL_OPENAI_API_KEYS="key-a:tenant-a,key-b:tenant-b",
+    ) as client:
+        created = client.post(
+            "/v1/responses/prompts",
+            headers={"Authorization": "Bearer key-a"},
+            json={"id": "pmpt_tenant", "version": "1", "input": "Prompt template marker word tenant-a."},
+        )
+        allowed = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-a"},
+            json={"model": "gpt-oss-120b", "prompt": {"id": "pmpt_tenant", "version": "1"}},
+        )
+        blocked = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-b"},
+            json={"model": "gpt-oss-120b", "prompt": {"id": "pmpt_tenant", "version": "1"}},
+        )
+
+    assert created.status_code == 200
+    assert allowed.status_code == 200
+    assert "tenant-a" in allowed.json()["output_text"]
+    assert blocked.status_code == 404
+    assert blocked.json()["error"]["code"] == "not_found"
+    assert blocked.json()["error"]["param"] == "prompt.id"
+
+
+def test_truncation_disabled_overflow_fails_before_backend(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'context_disabled.db'}",
+        MODEL_CONTEXT_WINDOWS="gpt-oss-120b=80",
+        CONTEXT_TOKEN_MARGIN="0",
+        MAX_OUTPUT_TOKENS_DEFAULT="1",
+    ) as client:
+        response = client.post("/v1/responses", json={"input": " ".join(f"overflow-{index}" for index in range(120))})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "context_length_exceeded"
+    assert response.json()["error"]["param"] == "input"
+
+
+def test_truncation_auto_drops_old_chain_and_records_event(tmp_path, monkeypatch):
+    database_path = tmp_path / "context_auto.db"
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{database_path}",
+        MODEL_CONTEXT_WINDOWS="gpt-oss-120b=180",
+        CONTEXT_TOKEN_MARGIN="0",
+        MAX_OUTPUT_TOKENS_DEFAULT="1",
+    ) as client:
+        old_items = [{"role": "user", "content": f"old context item {index} " * 4} for index in range(40)]
+        second = client.post(
+            "/v1/responses",
+            json={"input": [*old_items, {"role": "user", "content": "current short"}], "truncation": "auto", "store": True},
+        )
+
+    assert second.status_code == 200
+    assert second.json()["truncation"] == "auto"
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute("select type, strategy, input_tokens_before, input_tokens_after from response_context_events").fetchall()
+    assert rows
+    assert rows[0][0] == "truncation"
+    assert rows[0][1] == "truncation_auto"
+    assert rows[0][2] > rows[0][3]
+
+
+def test_context_management_compaction_emits_item_and_preserves_fact(client):
+    filler = " ".join(f"filler-{index}" for index in range(1200))
+    first = client.post(
+        "/v1/responses",
+        json={"input": f"The preserved marker word is amethyst. {filler}", "store": True},
+    ).json()
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first["id"],
+            "input": "What is the preserved marker word?",
+            "context_management": [{"type": "compaction", "compact_threshold": 1000}],
+            "store": True,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["output"][0]["type"] == "compaction"
+    assert isinstance(body["output"][0]["encrypted_content"], str)
+    assert body["output_text"] == "Mock response: amethyst"
+
+
+def test_compact_endpoint_returns_compacted_window_and_followup_memory(client):
+    filler = " ".join(f"compact-{index}" for index in range(80))
+    compacted = client.post(
+        "/v1/responses/compact",
+        json={
+            "input": [
+                {"role": "user", "content": f"The preserved marker word is amethyst. {filler}"},
+                {"role": "assistant", "content": "Noted."},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "The marker fact should be preserved."}]},
+            ]
+        },
+    )
+
+    assert compacted.status_code == 200
+    compacted_body = compacted.json()
+    assert compacted_body["object"] == "response.compaction"
+    assert compacted_body["usage"]["input_tokens"] > 0
+    compaction_item = compacted_body["output"][-1]
+    assert compaction_item["type"] == "compaction"
+    decoded = unseal_compaction_content(compaction_item["encrypted_content"], key=client.app.state.settings.reasoning_encryption_key)
+    assert "amethyst" in decoded["summary"]["text"]
+    assert "marker fact" in decoded["summary"]["text"]
+
+    followup = client.post(
+        "/v1/responses",
+        json={"input": [*compacted_body["output"], {"role": "user", "content": "What is the preserved marker word?"}], "store": False},
+    ).json()
+    assert followup["output_text"] == "Mock response: amethyst"
+
 
 def test_reasoning_output_item_and_usage(client):
     response = client.post(
@@ -249,6 +513,336 @@ def test_reasoning_input_item_round_trips_without_becoming_user_text(client):
     assert body["output_text"] == "Mock response: hello after reasoning"
     input_items = client.get(f"/v1/responses/{body['id']}/input_items?order=asc").json()
     assert input_items["data"][0]["type"] == "reasoning"
+
+
+def test_reasoning_encrypted_content_round_trips_through_store_false(client):
+    first = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-oss-120b",
+            "input": "reason with encrypted content",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "store": False,
+        },
+    )
+
+    assert first.status_code == 200
+    first_body = first.json()
+    reasoning_item = first_body["output"][0]
+    assert reasoning_item["type"] == "reasoning"
+    assert isinstance(reasoning_item["encrypted_content"], str)
+    assert "mock backend inspected" not in json.dumps(reasoning_item).lower()
+    decoded = unseal_reasoning_content(reasoning_item["encrypted_content"], key=client.app.state.settings.reasoning_encryption_key)
+    assert "mock backend inspected" in decoded["reasoning"].lower()
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                reasoning_item,
+                {"role": "user", "content": "continue after encrypted reasoning"},
+            ],
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "store": False,
+        },
+    )
+
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["output"][0]["type"] == "reasoning"
+    assert isinstance(second_body["output"][0]["encrypted_content"], str)
+    assert second_body["output_text"] == "Mock response: continue after encrypted reasoning"
+
+
+def test_reasoning_encrypted_content_is_stored_and_retrieved(client):
+    created = client.post(
+        "/v1/responses",
+        json={
+            "input": "store encrypted reasoning",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "store": True,
+        },
+    ).json()
+
+    retrieved = client.get(f"/v1/responses/{created['id']}").json()
+
+    assert retrieved["output"][0]["type"] == "reasoning"
+    assert retrieved["output"][0]["encrypted_content"] == created["output"][0]["encrypted_content"]
+
+
+def test_reasoning_xhigh_requires_model_capability(client, tmp_path, monkeypatch):
+    response = client.post("/v1/responses", json={"input": "xhigh please", "reasoning": {"effort": "xhigh"}})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_model_capability"
+    assert response.json()["error"]["param"] == "reasoning.effort"
+
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'xhigh.db'}",
+        MODEL_CAPABILITIES="gpt-oss-120b=text,reasoning,reasoning-effort-xhigh",
+    ) as xhigh_client:
+        accepted = xhigh_client.post("/v1/responses", json={"input": "xhigh please", "reasoning": {"effort": "xhigh"}})
+
+    assert accepted.status_code == 200
+    assert accepted.json()["reasoning"]["effort"] == "xhigh"
+
+
+def test_reasoning_effort_and_summary_values_are_validated(client):
+    for effort in ("none", "minimal", "low", "medium", "high"):
+        response = client.post("/v1/responses", json={"input": f"effort {effort}", "reasoning": {"effort": effort}})
+        assert response.status_code == 200
+        assert response.json()["reasoning"]["effort"] == effort
+
+    for summary in ("auto", "concise", "detailed"):
+        response = client.post("/v1/responses", json={"input": f"summary {summary}", "reasoning": {"effort": "low", "summary": summary}})
+        assert response.status_code == 200
+        assert response.json()["reasoning"]["summary"] == summary
+
+    invalid_effort = client.post("/v1/responses", json={"input": "bad effort", "reasoning": {"effort": "extreme"}})
+    assert invalid_effort.status_code == 400
+    assert invalid_effort.json()["error"]["code"] == "unsupported_parameter"
+    assert invalid_effort.json()["error"]["param"] == "reasoning.effort"
+
+    invalid_summary = client.post("/v1/responses", json={"input": "bad summary", "reasoning": {"summary": "raw"}})
+    assert invalid_summary.status_code == 400
+    assert invalid_summary.json()["error"]["code"] == "unsupported_parameter"
+    assert invalid_summary.json()["error"]["param"] == "reasoning.summary"
+
+
+def test_include_registry_rejects_hosted_tool_and_unknown_expansions(client):
+    response = client.post("/v1/responses", json={"input": "hello", "include": ["file_search_call.results"]})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_parameter"
+    assert response.json()["error"]["param"] == "include.0"
+
+    unknown = client.post("/v1/responses", json={"input": "hello", "include": ["message.input_file.artifact"]})
+    assert unknown.status_code == 400
+    assert unknown.json()["error"]["code"] == "unsupported_parameter"
+    assert unknown.json()["error"]["param"] == "include.0"
+
+
+def test_output_logprobs_include_requires_model_capability(client):
+    response = client.post("/v1/responses", json={"input": "hello", "include": ["message.output_text.logprobs"]})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_model_capability"
+    assert response.json()["error"]["param"] == "include"
+
+
+def test_output_logprobs_are_returned_when_mock_backend_can_provide_them(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        MODEL_CAPABILITIES="gpt-oss-120b=text,file-text,reasoning,tools,logprobs;moondream:latest=text,file-text,vision",
+    ) as client:
+        created = client.post(
+            "/v1/responses",
+            json={"input": "logprob marker", "include": ["message.output_text.logprobs"], "top_logprobs": 2, "store": True},
+        )
+
+        assert created.status_code == 200
+        body = created.json()
+        logprobs = body["output"][0]["content"][0]["logprobs"]
+        assert logprobs
+        assert {"token", "bytes", "logprob", "top_logprobs"}.issubset(logprobs[0])
+        assert len(logprobs[0]["top_logprobs"]) <= 3
+
+        retrieved = client.get(f"/v1/responses/{body['id']}").json()
+        assert retrieved["output"][0]["content"][0]["logprobs"] == logprobs
+
+
+def test_retrieve_include_can_expand_stored_logprobs(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        MODEL_CAPABILITIES="gpt-oss-120b=text,file-text,reasoning,tools,logprobs;moondream:latest=text,file-text,vision",
+    ) as client:
+        created = client.post("/v1/responses", json={"input": "deferred logprobs", "top_logprobs": 1, "store": True}).json()
+        assert created["output"][0]["content"][0]["logprobs"] == []
+
+        retrieved = client.get(f"/v1/responses/{created['id']}?include[]=message.output_text.logprobs").json()
+        assert retrieved["output"][0]["content"][0]["logprobs"]
+
+
+def test_input_file_artifacts_produce_output_annotations_and_retrieve(client):
+    file_text = "Respawn file marker word: cobalt."
+    created = client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "filename": "facts.txt", "file_data": _data_url("text/plain", base64.b64encode(file_text.encode()).decode())},
+                        {"type": "input_text", "text": "Repeat the marker word."},
+                    ],
+                }
+            ],
+            "store": True,
+        },
+    ).json()
+
+    annotation = created["output"][0]["content"][0]["annotations"][0]
+    assert annotation["type"] == "file_citation"
+    assert annotation["file_id"].startswith("art_")
+    assert annotation["filename"] == "facts.txt"
+    retrieved = client.get(f"/v1/responses/{created['id']}").json()
+    assert retrieved["output"][0]["content"][0]["annotations"] == created["output"][0]["content"][0]["annotations"]
+    input_items = client.get(f"/v1/responses/{created['id']}/input_items?order=asc").json()["data"]
+    assert not any(key.startswith("_respawn_") for key in input_items[0]["content"][0])
+    artifact_content = client.get(f"/v1/responses/{created['id']}/artifacts/{annotation['file_id']}/content")
+    assert artifact_content.status_code == 200
+    assert artifact_content.text == file_text
+
+
+def test_response_artifacts_list_paginates(client):
+    first_text = "Respawn first artifact marker."
+    second_text = "Respawn second artifact marker."
+    created = client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "filename": "first.txt", "file_data": _data_url("text/plain", base64.b64encode(first_text.encode()).decode())},
+                        {"type": "input_file", "filename": "second.txt", "file_data": _data_url("text/plain", base64.b64encode(second_text.encode()).decode())},
+                        {"type": "input_text", "text": "Mention both markers."},
+                    ],
+                }
+            ],
+            "store": True,
+        },
+    ).json()
+
+    first_page = client.get(f"/v1/responses/{created['id']}/artifacts?order=asc&limit=1").json()
+    second_page = client.get(f"/v1/responses/{created['id']}/artifacts?order=asc&limit=1&after={first_page['data'][0]['id']}").json()
+    before_second = client.get(f"/v1/responses/{created['id']}/artifacts?order=asc&before={second_page['data'][0]['id']}&limit=10").json()
+
+    assert first_page["object"] == "list"
+    assert first_page["has_more"] is True
+    assert first_page["first_id"] == first_page["data"][0]["id"]
+    assert first_page["last_id"] == first_page["data"][0]["id"]
+    assert first_page["data"][0]["filename"] == "first.txt"
+    assert second_page["data"][0]["filename"] == "second.txt"
+    assert before_second["data"][0]["id"] == first_page["data"][0]["id"]
+
+
+def test_files_api_create_list_content_delete(client):
+    upload = _upload_text_file(client, filename="facts-a.txt")
+    upload_b = _upload_text_file(client, filename="facts-b.txt", text="Respawn second file marker.")
+
+    assert upload.status_code == 200
+    assert upload_b.status_code == 200
+    created = upload.json()
+    created_b = upload_b.json()
+    assert created["object"] == "file"
+    assert created["id"].startswith("file_")
+    assert created["bytes"] == len("Respawn file marker word: cobalt.".encode())
+    assert created["purpose"] == "user_data"
+
+    listed = client.get("/v1/files?order=asc&limit=1").json()
+    assert [item["id"] for item in listed["data"]] == [created["id"]]
+    assert listed["first_id"] == created["id"]
+    assert listed["last_id"] == created["id"]
+    assert listed["has_more"] is True
+    second_page = client.get(f"/v1/files?order=asc&after={created['id']}&limit=1").json()
+    assert [item["id"] for item in second_page["data"]] == [created_b["id"]]
+
+    retrieved = client.get(f"/v1/files/{created['id']}").json()
+    content = client.get(f"/v1/files/{created['id']}/content")
+
+    assert retrieved["filename"] == "facts-a.txt"
+    assert content.status_code == 200
+    assert content.text == "Respawn file marker word: cobalt."
+
+    deleted = client.delete(f"/v1/files/{created['id']}").json()
+    missing = client.get(f"/v1/files/{created['id']}")
+
+    assert deleted == {"id": created["id"], "object": "file", "deleted": True}
+    assert missing.status_code == 404
+
+
+def test_files_api_quota_and_malware_errors(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'files_errors.db'}",
+        FILE_STORAGE_QUOTA_BYTES="8",
+    ) as client:
+        quota = client.post(
+            "/v1/files",
+            data={"purpose": "user_data"},
+            files={"file": ("too-large.txt", b"123456789", "text/plain")},
+        )
+
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'files_malware.db'}",
+    ) as client:
+        malware = client.post(
+            "/v1/files",
+            data={"purpose": "user_data"},
+            files={"file": ("eicar.txt", b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR", "text/plain")},
+        )
+
+    assert quota.status_code == 400
+    assert quota.json()["error"]["code"] == "storage_quota_exceeded"
+    assert malware.status_code == 400
+    assert malware.json()["error"]["code"] == "file_malware_detected"
+
+
+def test_files_api_ttl_cleanup(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'files_ttl.db'}",
+        FILE_DEFAULT_TTL_SECONDS="1",
+        FILE_CLEANUP_INTERVAL_SECONDS="0.1",
+    ) as client:
+        uploaded = _upload_text_file(client).json()
+        assert client.get(f"/v1/files/{uploaded['id']}").status_code == 200
+        time.sleep(1.4)
+        expired = client.get(f"/v1/files/{uploaded['id']}")
+
+    assert expired.status_code == 404
+
+
+def test_input_image_include_returns_safe_artifact_metadata(client):
+    created = client.post(
+        "/v1/responses",
+        json={
+            "model": "moondream:latest",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What color is the square?"},
+                        {"type": "input_image", "image_url": _data_url("image/png", TINY_RED_PNG_BASE64)},
+                    ],
+                }
+            ],
+            "include": ["message.input_image.image_url"],
+            "store": True,
+        },
+    )
+
+    assert created.status_code == 200
+    body = created.json()
+    image_part = body["input"][0]["content"][1]
+    assert image_part["artifact"]["id"].startswith("art_")
+    assert image_part["artifact"]["source"] == {"type": "data_url", "redacted": True}
+    assert "content" not in image_part["artifact"]
+
+    retrieved = client.get(f"/v1/responses/{body['id']}?include=message.input_image.image_url").json()
+    assert retrieved["input"][0]["content"][1]["artifact"] == image_part["artifact"]
 
 
 def test_background_response_create_poll_complete(client):
@@ -361,7 +955,6 @@ def test_conversation_field_is_out_of_scope(client):
 def test_phase_one_request_validation_is_explicit(client):
     cases = [
         ({"input": "hello", "service_tier": "vip"}, "service_tier"),
-        ({"input": "hello", "truncation": "auto"}, "truncation"),
         ({"input": "hello", "top_logprobs": 1}, "top_logprobs"),
         ({"input": "hello", "metadata": {"not_string": 1}}, "metadata.not_string"),
     ]
@@ -486,14 +1079,67 @@ def test_csv_and_pdf_file_inputs_are_extracted(client):
     assert "quartz" in pdf_response["output_text"]
 
 
-def test_file_id_and_audio_inputs_are_explicitly_unsupported(client):
-    file_id_response = client.post(
+def test_file_id_input_file_is_resolved_and_deleted_files_fail(client):
+    uploaded = _upload_text_file(client).json()
+    created = client.post(
         "/v1/responses",
-        json={"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file_123"}]}]},
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_file", "file_id": uploaded["id"]},
+                        {"type": "input_text", "text": "Repeat the marker word."},
+                    ],
+                }
+            ],
+            "store": True,
+        },
     )
-    assert file_id_response.status_code == 400
-    assert file_id_response.json()["error"]["code"] == "unsupported_parameter"
-    assert file_id_response.json()["error"]["param"] == "input.0.content.0.file_id"
+
+    assert created.status_code == 200
+    body = created.json()
+    assert "cobalt" in body["output_text"]
+    input_items = client.get(f"/v1/responses/{body['id']}/input_items?order=asc").json()["data"]
+    file_part = input_items[0]["content"][0]
+    assert file_part["file_id"] == uploaded["id"]
+    assert file_part["text"] == "Respawn file marker word: cobalt."
+
+    client.delete(f"/v1/files/{uploaded['id']}")
+    missing = client.post("/v1/responses", json={"input": [{"role": "user", "content": [{"type": "input_file", "file_id": uploaded["id"]}]}]})
+    assert missing.status_code == 404
+    assert missing.json()["error"]["param"] == "input.0.content.0.file_id"
+
+
+def test_file_id_tenant_isolation(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'files_tenant.db'}",
+        AUTH_DISABLED="false",
+        LOCAL_OPENAI_API_KEYS="key-a:tenant-a,key-b:tenant-b",
+    ) as client:
+        uploaded = _upload_text_file(client, headers={"Authorization": "Bearer key-a"}).json()
+        allowed = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-a"},
+            json={"input": [{"role": "user", "content": [{"type": "input_file", "file_id": uploaded["id"]}, {"type": "input_text", "text": "Repeat marker."}]}]},
+        )
+        blocked_retrieve = client.get(f"/v1/files/{uploaded['id']}", headers={"Authorization": "Bearer key-b"})
+        blocked_response = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-b"},
+            json={"input": [{"role": "user", "content": [{"type": "input_file", "file_id": uploaded["id"]}]}]},
+        )
+
+    assert allowed.status_code == 200
+    assert "cobalt" in allowed.json()["output_text"]
+    assert blocked_retrieve.status_code == 404
+    assert blocked_response.status_code == 404
+    assert blocked_response.json()["error"]["param"] == "input.0.content.0.file_id"
+
+
+def test_audio_inputs_are_explicitly_unsupported(client):
 
     audio_response = client.post(
         "/v1/responses",
@@ -521,7 +1167,15 @@ def test_invalid_prompt_cache_retention_is_explicit(client):
 
 
 def test_metrics_include_model_gateway_signals(client):
+    client.get("/readyz")
     client.post("/v1/responses", json={"model": "gpt-oss-120b", "input": "metrics"})
+    client.post("/v1/responses", json={"model": "gpt-oss-120b", "input": "metrics idempotent"}, headers={"Idempotency-Key": "metrics-idempotent"})
+    client.post("/v1/responses", json={"model": "gpt-oss-120b", "input": "metrics idempotent"}, headers={"Idempotency-Key": "metrics-idempotent"})
+    client.post("/v1/responses/prompts", json={"id": "pmpt_metrics", "version": "1", "input": "Prompt template marker word metrics."})
+    client.post("/v1/responses", json={"model": "gpt-oss-120b", "prompt": {"id": "pmpt_metrics", "version": "1"}})
+    uploaded = _upload_text_file(client).json()
+    client.get(f"/v1/files/{uploaded['id']}/content")
+    client.delete(f"/v1/files/{uploaded['id']}")
     first = client.post(
         "/v1/responses",
         json={
@@ -540,17 +1194,90 @@ def test_metrics_include_model_gateway_signals(client):
             "tools": [{"type": "function", "name": "calculator", "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}}}],
         },
     )
+    with client.stream("POST", "/v1/responses", json={"model": "gpt-oss-120b", "input": "metrics stream", "stream": True}) as stream:
+        "".join(stream.iter_text())
 
     response = client.get("/metrics")
 
     assert response.status_code == 200
     assert "gateway_responses_total" in response.text
     assert "gateway_response_latency_seconds_bucket" in response.text
+    assert "gateway_endpoint_requests_total" in response.text
+    assert "gateway_feature_requests_total" in response.text
+    assert "gateway_idempotency_requests_total" in response.text
     assert "gateway_inflight_responses" in response.text
     assert "gateway_model_token_usage_total" in response.text
+    assert "gateway_backend_model_info" in response.text
+    assert "gateway_backend_model_requests_total" in response.text
+    assert "gateway_backend_eval_tokens_total" in response.text
+    assert "gateway_backend_eval_duration_seconds_total" in response.text
+    assert "gateway_backend_eval_tokens_per_second" in response.text
+    assert "gateway_operational_failures_total" in response.text
+    assert "gateway_readiness_check" in response.text
+    assert "gateway_readiness_check_latency_seconds_bucket" in response.text
+    assert "gateway_storage_operations_total" in response.text
+    assert "gateway_streaming_responses_running" in response.text
     assert "gateway_function_tool_requests_total" in response.text
     assert "gateway_function_tool_calls_total" in response.text
     assert "gateway_function_tool_outputs_total" in response.text
+    assert "gateway_prompt_template_requests_total" in response.text
+    assert "gateway_prompt_cache_requests_total" in response.text
+    assert "gateway_prompt_cache_hit_ratio" in response.text
+
+
+def test_request_logs_include_operational_fields(client, monkeypatch):
+    log_records = []
+
+    def capture_log(message, *_, **kwargs):
+        log_records.append((message, kwargs.get("extra") or {}))
+
+    monkeypatch.setattr("src.main.logger.info", capture_log)
+    response = client.post("/v1/responses", json={"model": "gpt-oss-120b", "input": "structured log fields"})
+
+    assert response.status_code == 200
+    records = [record for record in log_records if record[0] == "HTTP request completed"]
+    assert records
+    extra = records[-1][1]
+    assert extra["request_id"] == response.headers["x-request-id"]
+    assert extra["response_id"] == response.json()["id"]
+    assert extra["tenant"] is None
+    assert extra["feature"] == "responses"
+    assert extra["backend"] == "mock"
+    assert extra["status"] == 200
+    assert extra["error_code"] is None
+    assert extra["latency_ms"] >= 0
+
+
+def test_reasoning_metrics_include_effort_tokens_and_heavy_counter(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'reasoning_metrics.db'}",
+        REASONING_HEAVY_TOKEN_THRESHOLD="1",
+    ) as client:
+        client.post(
+            "/v1/responses",
+            json={"model": "gpt-oss-120b", "input": "metrics reasoning", "reasoning": {"effort": "low", "summary": "auto"}},
+        )
+        response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "gateway_reasoning_requests_total" in response.text
+    assert "gateway_reasoning_tokens_total" in response.text
+    assert "gateway_reasoning_heavy_requests_total" in response.text
+
+
+def test_context_metrics_include_compaction_and_truncation(client):
+    client.post("/v1/responses/compact", json={"input": "The preserved marker word is amethyst."})
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "gateway_context_compactions_total" in response.text
+    assert "gateway_context_compaction_tokens_total" in response.text
+    assert "gateway_context_compaction_ratio_bucket" in response.text
+    assert "gateway_context_truncations_total" in response.text
+    assert "gateway_context_overflows_total" in response.text
 
 
 def test_stateful_previous_response_id(client):

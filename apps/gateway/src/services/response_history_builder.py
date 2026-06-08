@@ -13,6 +13,7 @@ def build_messages(
     instructions: str | None,
     chain: list[dict[str, Any]],
     input_value: str | list[dict[str, Any]] | None,
+    compaction_key: str | None = None,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     if instructions:
@@ -20,14 +21,14 @@ def build_messages(
 
     for response in chain:
         request = response["request_json"]
-        messages.extend(input_to_messages(response.get("input_items") or request.get("input")))
-        messages.extend(output_to_messages(response["output_json"]))
+        messages.extend(input_to_messages(response.get("input_items") or request.get("input"), compaction_key=compaction_key))
+        messages.extend(output_to_messages(response["output_json"], compaction_key=compaction_key))
 
-    messages.extend(input_to_messages(input_value))
+    messages.extend(input_to_messages(input_value, compaction_key=compaction_key))
     return messages
 
 
-def input_to_messages(input_value: str | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def input_to_messages(input_value: str | list[dict[str, Any]] | None, *, compaction_key: str | None = None) -> list[dict[str, Any]]:
     if input_value is None:
         return []
     if isinstance(input_value, str):
@@ -46,6 +47,11 @@ def input_to_messages(input_value: str | list[dict[str, Any]] | None) -> list[di
             messages.append({"role": mapped_role, "content": content_to_message_content(item.get("content", ""))})
         elif item_type == "reasoning":
             continue
+        elif item_type == "compaction":
+            _flush_tool_calls(messages, pending_tool_calls)
+            message = _compaction_message(item, compaction_key=compaction_key)
+            if message is not None:
+                messages.append(message)
         elif item_type == "function_call":
             pending_tool_calls.append(_chat_tool_call(item))
         elif item_type == "function_call_output":
@@ -60,7 +66,7 @@ def input_to_messages(input_value: str | list[dict[str, Any]] | None) -> list[di
     return messages
 
 
-def output_to_messages(output: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def output_to_messages(output: list[dict[str, Any]], *, compaction_key: str | None = None) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     pending_tool_calls: list[dict[str, Any]] = []
     for item in output or []:
@@ -69,19 +75,30 @@ def output_to_messages(output: list[dict[str, Any]]) -> list[dict[str, Any]]:
             messages.append({"role": item.get("role", "assistant"), "content": content_to_text(item.get("content", ""))})
         elif item.get("type") == "function_call":
             pending_tool_calls.append(_chat_tool_call(item))
+        elif item.get("type") == "compaction":
+            _flush_tool_calls(messages, pending_tool_calls)
+            message = _compaction_message(item, compaction_key=compaction_key)
+            if message is not None:
+                messages.append(message)
         elif item.get("type") in {"function_call_output", "tool_result", "reasoning"}:
             continue
     _flush_tool_calls(messages, pending_tool_calls)
     return messages
 
 
-def assistant_text_to_output(message_id: str, text: str) -> dict[str, Any]:
+def assistant_text_to_output(
+    message_id: str,
+    text: str,
+    *,
+    annotations: list[dict[str, Any]] | None = None,
+    logprobs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "id": message_id,
         "type": "message",
         "status": "completed",
         "role": "assistant",
-        "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}],
+        "content": [{"type": "output_text", "text": text, "annotations": annotations or [], "logprobs": logprobs or []}],
     }
 
 
@@ -101,6 +118,12 @@ def _flush_tool_calls(messages: list[dict[str, Any]], pending_tool_calls: list[d
         return
     messages.append({"role": "assistant", "content": "", "tool_calls": list(pending_tool_calls)})
     pending_tool_calls.clear()
+
+
+def _compaction_message(item: dict[str, Any], *, compaction_key: str | None) -> dict[str, str] | None:
+    from src.services.context_management import compaction_item_to_message
+
+    return compaction_item_to_message(item, key=compaction_key)
 
 
 def function_output_to_text(output: Any) -> str:

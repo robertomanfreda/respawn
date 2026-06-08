@@ -32,7 +32,7 @@ class ResponseRequest(BaseModel):
     prompt: dict[str, Any] | None = None
     prompt_cache_key: str | None = None
     prompt_cache_retention: str | None = None
-    context_management: dict[str, Any] | None = None
+    context_management: list[dict[str, Any]] | None = None
     service_tier: str | None = None
     top_logprobs: int | None = Field(default=None, ge=0, le=20)
     safety_identifier: str | None = None
@@ -121,7 +121,23 @@ class ResponseInputItemList(BaseModel):
     has_more: bool = False
 
 
+class ResponseArtifactList(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[dict[str, Any]]
+    first_id: str | None = None
+    last_id: str | None = None
+    has_more: bool = False
+
+
 class ResponseInputTokenCount(BaseModel):
     object: Literal["response.input_tokens"] = "response.input_tokens"
     input_tokens: int
     input_tokens_details: ResponseInputTokensDetails = Field(default_factory=ResponseInputTokensDetails)
+
+
+class ResponseCompactionObject(BaseModel):
+    id: str
+    object: Literal["response.compaction"] = "response.compaction"
+    created_at: int
+    output: list[dict[str, Any]]
+    usage: ResponseUsage = Field(default_factory=ResponseUsage)

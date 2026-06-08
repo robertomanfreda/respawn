@@ -35,6 +35,8 @@ def test_streaming_event_lifecycle(client):
     assert [event["data"]["sequence_number"] for event in events] == list(range(len(events)))
     assert all(event["id"] for event in events)
     assert all(event["data"]["type"] == event["event"] for event in events)
+    metrics = client.get("/metrics").text
+    assert 'gateway_streaming_responses_running{model="gpt-oss-120b"} 0.0' in metrics
 
     terminal_response = events[-1]["data"]["response"]
     retrieved = client.get(f"/v1/responses/{terminal_response['id']}").json()

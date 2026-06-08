@@ -42,9 +42,11 @@ services:
       RESPAWN_BENCHMARK_EXCLUDE_TAGS: ${RESPAWN_BENCHMARK_EXCLUDE_TAGS:-}
       RESPAWN_BENCHMARK_COVERAGE_GATE: ${RESPAWN_BENCHMARK_COVERAGE_GATE:-true}
       RESPAWN_BENCHMARK_OUTPUT: ${RESPAWN_BENCHMARK_OUTPUT:-/results/respawn-benchmark-mock.json}
+      RESPAWN_BENCHMARK_COMPARE_TO: ${RESPAWN_BENCHMARK_COMPARE_TO:-}
     command:
-      - python
-      - /benchmark/respawn_benchmark.py
+      - sh
+      - -c
+      - python -m pip install --no-cache-dir --target /tmp/respawn-benchmark-deps 'openai>=1.82' && PYTHONPATH=/tmp/respawn-benchmark-deps python /benchmark/respawn_benchmark.py
     volumes:
       - ./benchmark:/benchmark:ro
       - ./benchmark-results:/results

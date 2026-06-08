@@ -13,18 +13,41 @@ from src.observability.metrics import (
     BACKGROUND_JOB_LATENCY,
     BACKGROUND_JOB_RUNNING,
     BACKGROUND_JOBS,
+    CONTEXT_COMPACTION_RATIO,
+    CONTEXT_COMPACTION_TOKENS,
+    CONTEXT_COMPACTIONS,
+    CONTEXT_OVERFLOWS,
+    CONTEXT_TRUNCATIONS,
     FUNCTION_TOOL_CALLS,
     FUNCTION_TOOL_CAPABILITY_ERRORS,
     FUNCTION_TOOL_OUTPUTS,
     FUNCTION_TOOL_REQUESTS,
+    INCLUDE_EXPANSIONS,
+    INCLUDE_EXPANSION_BYTES,
     IN_FLIGHT_RESPONSES,
     MODEL_TOKEN_USAGE,
+    PROMPT_CACHE_HIT_RATIO,
+    PROMPT_CACHE_REQUESTS,
+    PROMPT_CACHE_TOKENS,
+    REASONING_HEAVY_REQUESTS,
+    REASONING_REQUESTS,
+    REASONING_TOKENS,
     RESPONSE_LATENCY,
     RESPONSES,
+    STREAMING_RESPONSES_RUNNING,
     TOKEN_USAGE,
 )
 from src.schemas.errors import OpenAIError
-from src.schemas.responses import ResponseInputItemList, ResponseInputTokenCount, ResponseObject, ResponseRequest, ResponseUsage
+from src.schemas.responses import ResponseArtifactList, ResponseCompactionObject, ResponseInputItemList, ResponseInputTokenCount, ResponseObject, ResponseRequest, ResponseUsage
+from src.services.context_management import ContextPlan, ContextPlanner, compact_response_window
+from src.services.include_expansions import (
+    OUTPUT_TEXT_LOGPROBS,
+    input_image_url_requested,
+    logprobs_requested,
+    requested_includes,
+    validate_include_capabilities,
+    validate_include_values,
+)
 from src.services.response_history_builder import (
     assistant_text_to_output,
     build_messages,
@@ -32,6 +55,7 @@ from src.services.response_history_builder import (
 from src.services.id_generator import generate_id
 from src.services.multimodal_inputs import prepare_multimodal_request
 from src.services.prompt_cache import PromptCache, PromptCacheMatch
+from src.services.prompt_templates import PromptTemplateRenderer
 from src.services.structured_outputs import repair_instruction, schema_from_response_format, validate_text_against_schema
 from src.services.responses_compat import (
     estimate_input_tokens,
@@ -42,14 +66,18 @@ from src.services.responses_compat import (
     input_items_from_request,
     normalized_text_config,
     paginate_items,
+    reasoning_encrypted_content_requested,
     reasoning_output_item,
     reasoning_requested,
     response_output_text,
     stream_obfuscation_enabled,
     tool_choice_instruction,
     validate_function_call_outputs_match,
+    validate_reasoning_capabilities,
     validate_text_responses_request,
 )
+from src.services.reasoning_encryption import seal_reasoning_content
+from src.services.reasoning_summaries import DeterministicReasoningSummaryProvider
 from src.services.usage_meter import enrich_response_usage, normalize_usage
 from src.storage.repository import ResponseRepository
 from src.streaming.events import make_event
@@ -74,14 +102,22 @@ class ResponseService:
         self.prompt_cache = prompt_cache
         self.session_factory = session_factory
         self.background_tasks = background_tasks
+        self.reasoning_summary_provider = DeterministicReasoningSummaryProvider()
+        self.context_planner = ContextPlanner(settings)
+        self.prompt_template_renderer = PromptTemplateRenderer(repository)
 
     async def create(self, request: ResponseRequest, tenant_id: str | None) -> ResponseObject:
         validate_text_responses_request(request)
+        request = await self._render_prompt_request(request, tenant_id)
+        validate_text_responses_request(request)
         model = request.model or self.settings.default_model
-        request = await prepare_multimodal_request(request, model=model, settings=self.settings)
+        validate_include_capabilities(request, model=model, settings=self.settings)
+        validate_reasoning_capabilities(request, model=model, settings=self.settings)
+        request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
         if request.background:
             return await self.create_background(request, tenant_id)
         response_id = generate_id("resp")
+        request = self._stamp_input_artifacts(request, response_id=response_id)
         should_store = self._should_store(request)
         mode = "blocking"
         status = "failed"
@@ -92,6 +128,7 @@ class ResponseService:
             FUNCTION_TOOL_REQUESTS.labels(model=model, status="started").inc()
         try:
             if should_store:
+                input_items = self._input_items(request)
                 await self.repository.create_response(
                     response_id=response_id,
                     model=model,
@@ -101,7 +138,8 @@ class ResponseService:
                     metadata_json=request.metadata,
                     tenant_id=tenant_id,
                 )
-                await self.repository.create_input_items(response_id=response_id, input_items=self._input_items(request))
+                await self.repository.create_input_items(response_id=response_id, input_items=input_items)
+                await self.repository.create_input_artifacts(response_id=response_id, input_items=input_items, tenant_id=tenant_id)
                 response_created = True
             output, usage, response_status, incomplete_details = await self._generate_response_output(
                 response_id=response_id,
@@ -116,6 +154,7 @@ class ResponseService:
             status = response_status
             if request.tools:
                 FUNCTION_TOOL_REQUESTS.labels(model=model, status=response_status).inc()
+            self._record_reasoning_metrics(model=model, request=request, usage=usage, status=response_status)
             return self._response_object(response_id, model, response_status, output, usage, request.metadata, request=request, should_store=should_store, incomplete_details=incomplete_details)
         except Exception as exc:
             if should_store and response_created:
@@ -124,16 +163,20 @@ class ResponseService:
             if isinstance(exc, OpenAIError):
                 if request.tools:
                     FUNCTION_TOOL_REQUESTS.labels(model=model, status="failed").inc()
+                self._record_reasoning_metrics(model=model, request=request, usage=ResponseUsage(), status="failed")
                 raise
             if request.tools:
                 FUNCTION_TOOL_REQUESTS.labels(model=model, status="failed").inc()
+            self._record_reasoning_metrics(model=model, request=request, usage=ResponseUsage(), status="failed")
             raise OpenAIError("Internal gateway error.", status_code=500, type="server_error", code="internal_error") from exc
         finally:
             self._record_response_metrics(model=model, mode=mode, status=status, should_store=should_store, started_at=started_at)
 
     async def create_background(self, request: ResponseRequest, tenant_id: str | None) -> ResponseObject:
         model = request.model or self.settings.default_model
+        validate_include_capabilities(request, model=model, settings=self.settings)
         response_id = generate_id("resp")
+        request = self._stamp_input_artifacts(request, response_id=response_id)
         should_store = self._should_store(request)
         if not should_store:
             raise OpenAIError("Background mode requires store=true.", param="store", code="invalid_request")
@@ -145,6 +188,7 @@ class ResponseService:
         if request.tools:
             FUNCTION_TOOL_REQUESTS.labels(model=model, status="queued").inc()
         try:
+            input_items = self._input_items(request)
             await self.repository.create_response(
                 response_id=response_id,
                 model=model,
@@ -155,7 +199,8 @@ class ResponseService:
                 tenant_id=tenant_id,
                 status="queued",
             )
-            await self.repository.create_input_items(response_id=response_id, input_items=self._input_items(request))
+            await self.repository.create_input_items(response_id=response_id, input_items=input_items)
+            await self.repository.create_input_artifacts(response_id=response_id, input_items=input_items, tenant_id=tenant_id)
             timeout_at = datetime.now(timezone.utc) + timedelta(seconds=self.settings.background_job_timeout_seconds)
             await self.repository.create_background_job(response_id=response_id, timeout_at=timeout_at)
             await self.repository.session.commit()
@@ -220,6 +265,7 @@ class ResponseService:
             terminal_status = response_status
             if request.tools:
                 FUNCTION_TOOL_REQUESTS.labels(model=record.model, status=response_status).inc()
+            self._record_reasoning_metrics(model=record.model, request=request, usage=usage, status=response_status)
             BACKGROUND_JOBS.labels(status=response_status).inc()
         except asyncio.TimeoutError as exc:
             terminal_status = "timeout"
@@ -276,9 +322,14 @@ class ResponseService:
 
     async def stream(self, request: ResponseRequest, tenant_id: str | None) -> AsyncIterator[str]:
         validate_text_responses_request(request)
+        request = await self._render_prompt_request(request, tenant_id)
+        validate_text_responses_request(request)
         model = request.model or self.settings.default_model
-        request = await prepare_multimodal_request(request, model=model, settings=self.settings)
+        validate_include_capabilities(request, model=model, settings=self.settings)
+        validate_reasoning_capabilities(request, model=model, settings=self.settings)
+        request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
         response_id = generate_id("resp")
+        request = self._stamp_input_artifacts(request, response_id=response_id)
         created_at = int(time.time())
         output_text = ""
         reasoning_text = ""
@@ -303,10 +354,12 @@ class ResponseService:
         should_store = self._should_store(request)
         response_created = False
         IN_FLIGHT_RESPONSES.labels(model=model, mode=mode).inc()
+        STREAMING_RESPONSES_RUNNING.labels(model=model).inc()
         if request.tools:
             FUNCTION_TOOL_REQUESTS.labels(model=model, status="started").inc()
         try:
             if should_store:
+                input_items = self._input_items(request)
                 await self.repository.create_response(
                     response_id=response_id,
                     model=model,
@@ -316,7 +369,8 @@ class ResponseService:
                     metadata_json=request.metadata,
                     tenant_id=tenant_id,
                 )
-                await self.repository.create_input_items(response_id=response_id, input_items=self._input_items(request))
+                await self.repository.create_input_items(response_id=response_id, input_items=input_items)
+                await self.repository.create_input_artifacts(response_id=response_id, input_items=input_items, tenant_id=tenant_id)
                 response_created = True
             in_progress_response = self._response_object(response_id, model, "in_progress", [], usage, request.metadata, request=request, should_store=should_store, created_at=created_at).model_dump()
             yield event("response.created", {"response": in_progress_response})
@@ -325,9 +379,26 @@ class ResponseService:
             submitted_tool_outputs = function_call_output_ids(request.input)
             if submitted_tool_outputs:
                 FUNCTION_TOOL_OUTPUTS.labels(model=model).inc(len(submitted_tool_outputs))
-            payload = self._payload(model=model, request=request, chain=chain)
+            plan = await self._plan_context(model=model, request=request, chain=chain, response_id=response_id, should_store=should_store, mode=mode)
+            payload = self._payload(model=model, request=plan.request, chain=plan.chain)
             cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+            self._record_prompt_cache_metrics(cache_match)
             output_index = 0
+            emitted_items: list[tuple[int, dict[str, Any]]] = []
+            if plan.compaction_item is not None:
+                compaction_item = {**plan.compaction_item, "status": "completed"}
+                if should_store:
+                    await self.repository.create_output_item(response_id=response_id, output_index=output_index, item=compaction_item)
+                yield event(
+                    "response.output_item.added",
+                    {
+                        "output_index": output_index,
+                        "item": compaction_item,
+                    },
+                )
+                yield event("response.output_item.done", {"output_index": output_index, "item": compaction_item})
+                emitted_items.append((output_index, compaction_item))
+                output_index += 1
             reasoning_id: str | None = None
             finish_reason: str | None = None
             yield event("response.in_progress", {"response": in_progress_response})
@@ -349,7 +420,6 @@ class ResponseService:
                 output_index += 1
             output_id: str | None = None
             text_output_index: int | None = None
-            emitted_items: list[tuple[int, dict[str, Any]]] = []
             async for chunk in self.backend.create_chat_completion_stream(payload):
                 if chunk.get("type") == "reasoning_delta":
                     reasoning_text += chunk.get("delta", "")
@@ -447,7 +517,7 @@ class ResponseService:
             )
             output = []
             if reasoning_id is not None:
-                reasoning_item = reasoning_output_item(reasoning_id, reasoning_text, request)
+                reasoning_item = self._reasoning_output_item(reasoning_id, reasoning_text, request, response_id=response_id)
                 output.append(reasoning_item)
                 if reasoning_item["summary"]:
                     summary_part = reasoning_item["summary"][0]
@@ -494,11 +564,12 @@ class ResponseService:
                     },
                 )
             if output_id is not None and text_output_index is not None:
-                emitted_items.append((text_output_index, assistant_text_to_output(output_id, output_text)))
+                emitted_items.append((text_output_index, assistant_text_to_output(output_id, output_text, annotations=self._output_annotations(request))))
             output.extend(item for _, item in sorted(emitted_items, key=lambda pair: pair[0]))
             self._record_token_usage(model, usage)
-            self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
             response_status, incomplete_details = self._completion_status(finish_reason)
+            self._record_reasoning_metrics(model=model, request=request, usage=usage, status=response_status)
+            self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
             if response_status == "incomplete" and output:
                 output[-1]["status"] = "incomplete"
             if should_store:
@@ -516,7 +587,7 @@ class ResponseService:
                         "item_id": output_id,
                         "output_index": text_output_index,
                         "content_index": 0,
-                        "part": {"type": "output_text", "text": output_text, "annotations": [], "logprobs": []},
+                        "part": {"type": "output_text", "text": output_text, "annotations": self._output_annotations(request), "logprobs": []},
                     },
                 )
                 yield event("response.output_item.done", {"output_index": text_output_index, "item": text_item})
@@ -537,17 +608,25 @@ class ResponseService:
             status = "failed"
             if request.tools:
                 FUNCTION_TOOL_REQUESTS.labels(model=model, status="failed").inc()
+            self._record_reasoning_metrics(model=model, request=request, usage=usage, status="failed")
             if should_store and response_created:
                 await self.repository.fail_response(response_id, _error_json(exc))
                 await self.repository.session.commit()
             yield event("response.failed", {"response": self._response_object(response_id, model, "failed", [], usage, request.metadata, request=request, should_store=should_store, error=_error_json(exc), created_at=created_at).model_dump()})
             yield event("error", {"error": _error_json(exc)})
         finally:
+            STREAMING_RESPONSES_RUNNING.labels(model=model).dec()
             self._record_response_metrics(model=model, mode=mode, status=status, should_store=should_store, started_at=started_at)
 
-    async def retrieve(self, response_id: str, tenant_id: str | None) -> ResponseObject:
+    async def retrieve(self, response_id: str, tenant_id: str | None, *, include: list[str] | None = None) -> ResponseObject:
+        if include is not None:
+            validate_include_values(include)
         record = await self.repository.require_response(response_id, tenant_id)
         output = await self.repository.list_output_items(response_id, tenant_id)
+        artifacts = await self.repository.list_artifacts(response_id, tenant_id)
+        request_json = record.request_json or {}
+        effective_include = self._effective_includes(request_json, include)
+        self._validate_retrieve_include_capabilities(record.model, output or record.output_json or [], effective_include)
         return self._response_object(
             record.id,
             record.model,
@@ -555,14 +634,18 @@ class ResponseService:
             output or record.output_json or [],
             normalize_usage(record.usage_json),
             record.metadata_json or {},
-            request_json=record.request_json or {},
+            request_json=request_json,
             should_store=bool((record.request_json or {}).get("store", self.settings.store_default)),
             error=record.error_json,
             incomplete_details=self._stored_incomplete_details(record.status),
             created_at=int(record.created_at.timestamp()),
+            include=effective_include,
+            artifacts=artifacts,
         )
 
-    async def list_input_items(self, response_id: str, tenant_id: str | None, *, after: str | None, before: str | None, limit: int, order: str) -> ResponseInputItemList:
+    async def list_input_items(self, response_id: str, tenant_id: str | None, *, after: str | None, before: str | None, limit: int, order: str, include: list[str] | None = None) -> ResponseInputItemList:
+        if include is not None:
+            validate_include_values(include)
         record = await self.repository.require_response(response_id, tenant_id)
         items = await self.repository.list_input_items(response_id, tenant_id)
         if not items:
@@ -575,16 +658,58 @@ class ResponseService:
             has_more=has_more,
         )
 
+    async def list_artifacts(self, response_id: str, tenant_id: str | None, *, after: str | None, before: str | None, limit: int, order: str) -> ResponseArtifactList:
+        await self.repository.require_response(response_id, tenant_id)
+        artifacts = await self.repository.list_artifacts(response_id, tenant_id)
+        page, has_more = paginate_items(artifacts, after=after, before=before, limit=limit, order=order)
+        return ResponseArtifactList(
+            data=[_public_artifact(artifact, include_content=False) for artifact in page],
+            first_id=page[0]["id"] if page else None,
+            last_id=page[-1]["id"] if page else None,
+            has_more=has_more,
+        )
+
     async def count_input_tokens(self, request: ResponseRequest, tenant_id: str | None) -> ResponseInputTokenCount:
         validate_text_responses_request(request)
+        request = await self._render_prompt_request(request, tenant_id)
+        validate_text_responses_request(request)
         model = request.model or self.settings.default_model
-        request = await prepare_multimodal_request(request, model=model, settings=self.settings)
+        validate_reasoning_capabilities(request, model=model, settings=self.settings)
+        request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
         chain = await self.repository.load_chain(request.previous_response_id, tenant_id, self.settings.max_chain_depth)
         validate_function_call_outputs_match(chain, request.input)
         payload = self._payload(model=model, request=request, chain=chain)
         cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-        input_tokens = cache_match.input_tokens or estimate_input_tokens(request, chain)
+        self._record_prompt_cache_metrics(cache_match)
+        input_tokens = max(cache_match.input_tokens, self.context_planner.count_payload_tokens(payload), estimate_input_tokens(request, chain))
         return ResponseInputTokenCount(input_tokens=input_tokens, input_tokens_details={"cached_tokens": min(cache_match.cached_tokens, input_tokens)})
+
+    async def compact(self, request: ResponseRequest, tenant_id: str | None) -> ResponseCompactionObject:
+        validate_text_responses_request(request)
+        request = await self._render_prompt_request(request, tenant_id)
+        validate_text_responses_request(request)
+        if request.previous_response_id is not None:
+            raise OpenAIError("responses/compact is stateless and does not accept previous_response_id.", param="previous_response_id", code="invalid_request")
+        model = request.model or self.settings.default_model
+        validate_reasoning_capabilities(request, model=model, settings=self.settings)
+        request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
+        response_id = generate_id("resp")
+        output, after_request, summary, before, after = compact_response_window(input_value=request.input, model=model, settings=self.settings)
+        usage = ResponseUsage(input_tokens=before, output_tokens=after, total_tokens=before + after)
+        await self.repository.save_context_event(
+            response_id=response_id,
+            source_response_id=None,
+            type="compaction",
+            strategy="standalone_compact",
+            compacted_item_id=output[-1].get("id") if output else None,
+            source_item_ids=summary.get("source_item_ids", []),
+            summary_json=summary,
+            input_tokens_before=before,
+            input_tokens_after=after,
+        )
+        await self.repository.session.commit()
+        self._record_compaction_metrics(model=model, mode="standalone", before=before, after=after)
+        return ResponseCompactionObject(id=response_id, created_at=int(time.time()), output=output, usage=usage)
 
     async def delete(self, response_id: str, tenant_id: str | None) -> None:
         await self.repository.soft_delete(response_id, tenant_id)
@@ -604,16 +729,88 @@ class ResponseService:
         submitted_tool_outputs = function_call_output_ids(request.input)
         if submitted_tool_outputs:
             FUNCTION_TOOL_OUTPUTS.labels(model=model).inc(len(submitted_tool_outputs))
-        payload = self._payload(model=model, request=request, chain=chain)
+        plan = await self._plan_context(model=model, request=request, chain=chain, response_id=response_id, should_store=should_store, mode="create")
+        payload = self._payload(model=model, request=plan.request, chain=plan.chain)
         cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-        result = await self._run_with_structured_repair(response_id=response_id, payload=payload, request=request, should_store=should_store)
+        self._record_prompt_cache_metrics(cache_match)
+        result = await self._run_with_structured_repair(response_id=response_id, payload=payload, request=plan.request, should_store=should_store)
+        self._validate_logprobs_result(result, request, model)
         self._validate_tool_result(result, request, model)
         usage = self._usage(result, cache_match)
         response_status, incomplete_details = self._completion_status(result.finish_reason)
-        output = self._output_items(result, request, response_status=response_status)
+        output = self._output_items(result, request, response_id=response_id, response_status=response_status)
+        if plan.compaction_item is not None:
+            output.insert(0, {**plan.compaction_item, "status": "completed"})
         self._record_token_usage(model, usage)
         self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
         return output, usage, response_status, incomplete_details
+
+    async def _plan_context(
+        self,
+        *,
+        model: str,
+        request: ResponseRequest,
+        chain: list[dict[str, Any]],
+        response_id: str,
+        should_store: bool,
+        mode: str,
+    ) -> ContextPlan:
+        try:
+            plan = self.context_planner.plan(model=model, request=request, chain=chain)
+        except OpenAIError as exc:
+            if exc.code == "context_length_exceeded":
+                CONTEXT_OVERFLOWS.labels(model=model, truncation=request.truncation).inc()
+            raise
+
+        if plan.strategy == "truncation_auto":
+            CONTEXT_TRUNCATIONS.labels(model=model, reason="context_window").inc(plan.truncated_items or 1)
+            if should_store:
+                await self.repository.save_context_event(
+                    response_id=response_id,
+                    source_response_id=request.previous_response_id,
+                    type="truncation",
+                    strategy=plan.strategy,
+                    compacted_item_id=None,
+                    source_item_ids=[],
+                    summary_json=None,
+                    input_tokens_before=plan.input_tokens_before,
+                    input_tokens_after=plan.input_tokens_after,
+                )
+        elif plan.compaction_item is not None:
+            self._record_compaction_metrics(model=model, mode=mode, before=plan.input_tokens_before, after=plan.input_tokens_after)
+            if should_store:
+                await self.repository.save_context_event(
+                    response_id=response_id,
+                    source_response_id=request.previous_response_id,
+                    type="compaction",
+                    strategy=plan.strategy,
+                    compacted_item_id=plan.compaction_item.get("id"),
+                    source_item_ids=plan.source_item_ids or [],
+                    summary_json=plan.compaction_summary,
+                    input_tokens_before=plan.input_tokens_before,
+                    input_tokens_after=plan.input_tokens_after,
+                )
+        return plan
+
+    def _record_compaction_metrics(self, *, model: str, mode: str, before: int, after: int) -> None:
+        CONTEXT_COMPACTIONS.labels(model=model, mode=mode).inc()
+        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, phase="before").inc(before)
+        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, phase="after").inc(after)
+        CONTEXT_TRUNCATIONS.labels(model=model, reason="context_window").inc(0)
+        CONTEXT_OVERFLOWS.labels(model=model, truncation="disabled").inc(0)
+        ratio = after / before if before > 0 else 0.0
+        CONTEXT_COMPACTION_RATIO.labels(model=model, mode=mode).observe(ratio)
+
+    async def _render_prompt_request(self, request: ResponseRequest, tenant_id: str | None) -> ResponseRequest:
+        return await self.prompt_template_renderer.render_request(request, tenant_id)
+
+    def _record_prompt_cache_metrics(self, cache_match: PromptCacheMatch) -> None:
+        status = "hit" if cache_match.cached_tokens > 0 else "miss"
+        PROMPT_CACHE_REQUESTS.labels(retention=cache_match.retention, status=status).inc()
+        PROMPT_CACHE_TOKENS.labels(kind="input").inc(cache_match.input_tokens)
+        PROMPT_CACHE_TOKENS.labels(kind="cached").inc(cache_match.cached_tokens)
+        ratio = cache_match.cached_tokens / cache_match.input_tokens if cache_match.input_tokens > 0 else 0.0
+        PROMPT_CACHE_HIT_RATIO.labels(retention=cache_match.retention).set(ratio)
 
     def _schedule_background_response(self, response_id: str, tenant_id: str | None) -> None:
         if self.session_factory is None or self.background_tasks is None:
@@ -640,7 +837,12 @@ class ResponseService:
         )
 
     def _payload(self, *, model: str, request: ResponseRequest, chain: list[dict[str, Any]]) -> dict[str, Any]:
-        messages = build_messages(instructions=request.instructions, chain=chain, input_value=request.input)
+        messages = build_messages(
+            instructions=request.instructions,
+            chain=chain,
+            input_value=request.input,
+            compaction_key=self.settings.reasoning_encryption_key,
+        )
         instruction = tool_choice_instruction(request)
         if instruction:
             messages.insert(0, {"role": "system", "content": instruction})
@@ -668,16 +870,24 @@ class ResponseService:
             payload["response_format"] = structured_format
         if request.reasoning is not None:
             payload["reasoning"] = request.reasoning
+        if request.top_logprobs is not None or OUTPUT_TEXT_LOGPROBS in requested_includes(request):
+            payload["top_logprobs"] = request.top_logprobs or 0
         return {k: v for k, v in payload.items() if v is not None}
 
-    def _output_items(self, result: ChatCompletionResult, request: ResponseRequest, *, response_status: str = "completed") -> list[dict[str, Any]]:
+    def _output_items(self, result: ChatCompletionResult, request: ResponseRequest, *, response_id: str, response_status: str = "completed") -> list[dict[str, Any]]:
         output = [*result.output_items]
         if reasoning_requested(request):
-            output.insert(0, reasoning_output_item(generate_id("rs"), result.reasoning, request))
+            item_id = generate_id("rs")
+            output.insert(0, self._reasoning_output_item(item_id, result.reasoning, request, response_id=response_id))
         function_calls = self._function_call_output_items(result.tool_calls, request)
         output.extend(function_calls)
         if result.content or not function_calls:
-            item = assistant_text_to_output(generate_id("msg"), result.content)
+            item = assistant_text_to_output(
+                generate_id("msg"),
+                result.content,
+                annotations=self._output_annotations(request),
+                logprobs=result.content_logprobs,
+            )
             if response_status == "incomplete":
                 item["status"] = "incomplete"
             output.append(item)
@@ -724,6 +934,19 @@ class ResponseService:
                 self._tool_capability_error(model, "forced_tool_choice", "Configured backend/model did not call the requested function.")
         if tool_call_count:
             FUNCTION_TOOL_CALLS.labels(model=model).inc(tool_call_count)
+
+    def _validate_logprobs_result(self, result: ChatCompletionResult, request: ResponseRequest, model: str) -> None:
+        if not (request.top_logprobs is not None or OUTPUT_TEXT_LOGPROBS in requested_includes(request)):
+            return
+        if not result.content or result.content_logprobs:
+            return
+        INCLUDE_EXPANSIONS.labels(include=OUTPUT_TEXT_LOGPROBS, status="missing_backend_data").inc()
+        raise OpenAIError(
+            "Configured backend/model did not return output text logprobs.",
+            status_code=400,
+            param="include" if OUTPUT_TEXT_LOGPROBS in requested_includes(request) else "top_logprobs",
+            code="unsupported_model_capability",
+        )
 
     def _tool_choice_requires_output(self, request: ResponseRequest) -> bool:
         tool_choice = request.tool_choice
@@ -816,15 +1039,26 @@ class ResponseService:
         for item in input_value:
             item_type = item.get("type")
             role = item.get("role")
-            if item_type == "reasoning":
+            if item_type == "compaction":
                 items.append(
                     {
-                        "id": generate_id("rs"),
-                        "type": "reasoning",
-                        "summary": item.get("summary", []),
+                        "id": str(item.get("id") or generate_id("cmp")),
+                        "type": "compaction",
+                        "encrypted_content": str(item.get("encrypted_content") or ""),
                         "status": item.get("status", "completed"),
                     }
                 )
+                continue
+            if item_type == "reasoning":
+                reasoning_item = {
+                    "id": str(item.get("id") or generate_id("rs")),
+                    "type": "reasoning",
+                    "summary": item.get("summary", []),
+                    "status": item.get("status", "completed"),
+                }
+                if item.get("encrypted_content") is not None:
+                    reasoning_item["encrypted_content"] = item.get("encrypted_content")
+                items.append(reasoning_item)
                 continue
             if item_type == "function_call":
                 items.append(
@@ -921,6 +1155,193 @@ class ResponseService:
             return {"effort": reasoning.get("effort"), "summary": reasoning.get("summary")}
         return {"effort": None, "summary": None}
 
+    def _effective_includes(self, request_snapshot: dict[str, Any], include: list[str] | None) -> list[str]:
+        values: list[str] = []
+        for value in request_snapshot.get("include") or []:
+            if isinstance(value, str) and value not in values:
+                values.append(value)
+        for value in include or []:
+            if isinstance(value, str) and value not in values:
+                values.append(value)
+        return values
+
+    def _validate_retrieve_include_capabilities(self, model: str, output: list[dict[str, Any]], include: list[str]) -> None:
+        if OUTPUT_TEXT_LOGPROBS not in include or self._output_has_logprobs(output):
+            return
+        validate_include_capabilities({"include": [OUTPUT_TEXT_LOGPROBS]}, model=model, settings=self.settings)
+
+    def _output_has_logprobs(self, output: list[dict[str, Any]]) -> bool:
+        for item in output or []:
+            for part in item.get("content") or []:
+                if isinstance(part, dict) and part.get("type") == "output_text" and part.get("logprobs"):
+                    return True
+        return False
+
+    def _response_input(self, input_value: Any, include: list[str], artifacts: list[dict[str, Any]] | None) -> Any:
+        if not isinstance(input_value, list):
+            return input_value
+        artifacts_by_id = {artifact["id"]: artifact for artifact in artifacts or [] if isinstance(artifact, dict) and artifact.get("id")}
+        if not artifacts_by_id:
+            artifacts_by_id = self._artifact_map_from_input(input_value)
+        return [self._response_input_item(item, include, artifacts_by_id) for item in input_value]
+
+    def _response_input_item(self, item: Any, include: list[str], artifacts_by_id: dict[str, dict[str, Any]]) -> Any:
+        if not isinstance(item, dict):
+            return item
+        next_item = {key: value for key, value in item.items() if not key.startswith("_respawn_")}
+        content = next_item.get("content")
+        if isinstance(content, list):
+            next_item["content"] = [self._response_content_part(part, include, artifacts_by_id) for part in content]
+        elif isinstance(content, dict):
+            next_item["content"] = self._response_content_part(content, include, artifacts_by_id)
+        elif item.get("type") in {"input_image", "input_file"}:
+            next_item = self._response_content_part(item, include, artifacts_by_id)
+        return next_item
+
+    def _response_content_part(self, part: Any, include: list[str], artifacts_by_id: dict[str, dict[str, Any]]) -> Any:
+        if not isinstance(part, dict):
+            return part
+        next_part = {key: value for key, value in part.items() if not key.startswith("_respawn_")}
+        artifact_id = part.get("_respawn_artifact_id")
+        artifact = artifacts_by_id.get(artifact_id) if isinstance(artifact_id, str) else None
+        if part.get("type") == "input_image" and input_image_url_requested(include):
+            if artifact is not None:
+                next_part["artifact"] = _public_artifact(artifact, include_content=False)
+            if not next_part.get("image_url") and artifact is not None:
+                source = artifact.get("source") or {}
+                if source.get("type") == "url":
+                    next_part["image_url"] = source.get("url")
+        return next_part
+
+    def _response_output(self, output: list[dict[str, Any]], include: list[str]) -> list[dict[str, Any]]:
+        include_logprobs = logprobs_requested(include)
+        serialized = []
+        for item in output or []:
+            next_item = dict(item)
+            content = next_item.get("content")
+            if isinstance(content, list):
+                next_content = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "output_text":
+                        next_part = dict(part)
+                        if not include_logprobs:
+                            next_part["logprobs"] = []
+                        next_content.append(next_part)
+                    else:
+                        next_content.append(part)
+                next_item["content"] = next_content
+            serialized.append(next_item)
+        return serialized
+
+    def _enforce_include_payload_limit(self, include: list[str], *, input_value: Any, output: list[dict[str, Any]]) -> None:
+        if not include:
+            return
+        size = len(json.dumps({"input": input_value, "output": output}, default=str, separators=(",", ":")).encode("utf-8"))
+        if size > self.settings.include_expansion_max_bytes:
+            raise OpenAIError(
+                f"Expanded include payload exceeds the {self.settings.include_expansion_max_bytes} byte limit.",
+                param="include",
+                code="payload_too_large",
+            )
+        for value in include:
+            INCLUDE_EXPANSIONS.labels(include=value, status="expanded").inc()
+            INCLUDE_EXPANSION_BYTES.labels(include=value).inc(size)
+
+    def _stamp_input_artifacts(self, request: ResponseRequest, *, response_id: str) -> ResponseRequest:
+        if not isinstance(request.input, list):
+            return request
+        stamped = [self._stamp_input_item_artifacts(item, response_id=response_id) for item in request.input]
+        return request.model_copy(update={"input": stamped})
+
+    def _stamp_input_item_artifacts(self, item: Any, *, response_id: str) -> Any:
+        if not isinstance(item, dict):
+            return item
+        item_type = item.get("type")
+        role = item.get("role")
+        if item_type in {"input_image", "input_file"}:
+            return self._stamp_content_part_artifact(item, response_id=response_id)
+        if item_type != "message" and role not in {"user", "assistant", "system", "developer"}:
+            return item
+        content = item.get("content")
+        if isinstance(content, list):
+            return {**item, "content": [self._stamp_content_part_artifact(part, response_id=response_id) for part in content]}
+        if isinstance(content, dict):
+            return {**item, "content": self._stamp_content_part_artifact(content, response_id=response_id)}
+        return item
+
+    def _stamp_content_part_artifact(self, part: Any, *, response_id: str) -> Any:
+        if not isinstance(part, dict) or part.get("type") not in {"input_image", "input_file"}:
+            return part
+        artifact_id = part.get("_respawn_artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            artifact_id = generate_id("art")
+        return {**part, "_respawn_artifact_id": artifact_id, "_respawn_response_id": response_id}
+
+    def _output_annotations(self, request: ResponseRequest) -> list[dict[str, Any]]:
+        annotations: list[dict[str, Any]] = []
+        for index, part in enumerate(self._input_file_parts(request.input)):
+            artifact_id = part.get("_respawn_artifact_id")
+            if not isinstance(artifact_id, str) or not artifact_id:
+                continue
+            annotations.append(
+                {
+                    "type": "file_citation",
+                    "file_id": artifact_id,
+                    "filename": str(part.get("filename") or "input_file"),
+                    "index": index,
+                }
+            )
+        return annotations
+
+    def _input_file_parts(self, input_value: Any) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        if not isinstance(input_value, list):
+            return parts
+        for item in input_value:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "input_file":
+                parts.append(item)
+                continue
+            content = item.get("content")
+            if isinstance(content, dict) and content.get("type") == "input_file":
+                parts.append(content)
+            elif isinstance(content, list):
+                parts.extend(part for part in content if isinstance(part, dict) and part.get("type") == "input_file")
+        return parts
+
+    def _artifact_map_from_input(self, input_value: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        artifacts: dict[str, dict[str, Any]] = {}
+        for item in input_value:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if item.get("type") in {"input_image", "input_file"}:
+                candidate_parts = [item]
+            elif isinstance(content, dict):
+                candidate_parts = [content]
+            elif isinstance(content, list):
+                candidate_parts = [part for part in content if isinstance(part, dict)]
+            else:
+                candidate_parts = []
+            for part in candidate_parts:
+                if part.get("type") not in {"input_image", "input_file"}:
+                    continue
+                artifact_id = part.get("_respawn_artifact_id")
+                if not isinstance(artifact_id, str) or not artifact_id:
+                    continue
+                artifacts[artifact_id] = {
+                    "id": artifact_id,
+                    "object": "response.artifact",
+                    "type": part.get("type"),
+                    "filename": part.get("filename"),
+                    "mime_type": part.get("mime_type"),
+                    "size_bytes": _safe_int(part.get("size_bytes")),
+                    "source": _source_reference(part),
+                    "content": {"text": part.get("text")} if part.get("type") == "input_file" and isinstance(part.get("text"), str) else None,
+                }
+        return artifacts
+
     def _record_token_usage(self, model: str, usage: ResponseUsage) -> None:
         TOKEN_USAGE.labels(model=model, kind="input").inc(usage.input_tokens)
         TOKEN_USAGE.labels(model=model, kind="output").inc(usage.output_tokens)
@@ -932,6 +1353,37 @@ class ResponseService:
         MODEL_TOKEN_USAGE.labels(api="responses", model=model, kind="total").inc(usage.total_tokens)
         MODEL_TOKEN_USAGE.labels(api="responses", model=model, kind="cached_input").inc(usage.input_tokens_details.cached_tokens)
         MODEL_TOKEN_USAGE.labels(api="responses", model=model, kind="reasoning").inc(usage.output_tokens_details.reasoning_tokens)
+
+    def _record_reasoning_metrics(self, *, model: str, request: ResponseRequest, usage: ResponseUsage, status: str) -> None:
+        if not reasoning_requested(request):
+            return
+        reasoning = request.reasoning or {}
+        effort = str(reasoning.get("effort") or "auto")
+        summary = str(reasoning.get("summary") or "none")
+        encrypted_content = str(reasoning_encrypted_content_requested(request)).lower()
+        tokens = usage.output_tokens_details.reasoning_tokens
+        REASONING_REQUESTS.labels(model=model, effort=effort, summary=summary, encrypted_content=encrypted_content, status=status).inc()
+        REASONING_TOKENS.labels(model=model, effort=effort).inc(tokens)
+        REASONING_HEAVY_REQUESTS.labels(model=model, effort=effort).inc(0)
+        if tokens >= self.settings.reasoning_heavy_token_threshold:
+            REASONING_HEAVY_REQUESTS.labels(model=model, effort=effort).inc()
+
+    def _reasoning_output_item(self, item_id: str, reasoning_text: str, request: ResponseRequest, *, response_id: str) -> dict[str, Any]:
+        encrypted_content = None
+        if reasoning_encrypted_content_requested(request):
+            encrypted_content = seal_reasoning_content(
+                reasoning_text,
+                key=self.settings.reasoning_encryption_key,
+                response_id=response_id,
+                item_id=item_id,
+            )
+        return reasoning_output_item(
+            item_id,
+            reasoning_text,
+            request,
+            encrypted_content=encrypted_content,
+            summary_provider=self.reasoning_summary_provider,
+        )
 
     def _record_response_metrics(self, *, model: str, mode: str, status: str, should_store: bool, started_at: float) -> None:
         RESPONSE_LATENCY.labels(model=model, mode=mode).observe(time.perf_counter() - started_at)
@@ -953,22 +1405,28 @@ class ResponseService:
         error: dict[str, Any] | None = None,
         incomplete_details: dict[str, Any] | None = None,
         created_at: int | None = None,
+        include: list[str] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> ResponseObject:
         request_snapshot = self._request_snapshot(request=request, request_json=request_json)
+        effective_include = self._effective_includes(request_snapshot, include)
+        serialized_input = self._response_input(request_snapshot.get("input"), effective_include, artifacts)
+        serialized_output = self._response_output(output, effective_include)
+        self._enforce_include_payload_limit(effective_include, input_value=serialized_input, output=serialized_output)
         return ResponseObject(
             id=response_id,
             created_at=created_at or int(time.time()),
             status=status,
             error=error,
             incomplete_details=incomplete_details,
-            input=request_snapshot.get("input"),
+            input=serialized_input,
             background=bool(request_snapshot.get("background", False)),
             instructions=request_snapshot.get("instructions"),
             max_output_tokens=request_snapshot.get("max_output_tokens"),
             max_tool_calls=request_snapshot.get("max_tool_calls"),
             model=model,
-            output=output,
-            output_text=response_output_text(output),
+            output=serialized_output,
+            output_text=response_output_text(serialized_output),
             parallel_tool_calls=bool(request_snapshot.get("parallel_tool_calls", bool(request_snapshot.get("tools")))),
             previous_response_id=request_snapshot.get("previous_response_id"),
             prompt=request_snapshot.get("prompt"),
@@ -995,6 +1453,41 @@ def _error_json(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, OpenAIError):
         return exc.to_response()["error"]
     return {"message": str(exc), "type": "server_error", "param": None, "code": "internal_error"}
+
+
+def _public_artifact(artifact: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
+    public = {
+        "id": artifact.get("id"),
+        "object": artifact.get("object", "response.artifact"),
+        "type": artifact.get("type"),
+        "filename": artifact.get("filename"),
+        "mime_type": artifact.get("mime_type"),
+        "size_bytes": artifact.get("size_bytes", 0),
+        "source": artifact.get("source") or {},
+    }
+    if include_content:
+        public["content"] = artifact.get("content")
+    return public
+
+
+def _source_reference(part: dict[str, Any]) -> dict[str, Any]:
+    source = part.get("source") or part.get("image_url")
+    if not isinstance(source, str) or not source:
+        return {"type": "unknown"}
+    if source.startswith(("http://", "https://")):
+        return {"type": "url", "url": source}
+    if source.startswith("data:"):
+        return {"type": "data_url", "redacted": True}
+    if source == "base64":
+        return {"type": "base64", "redacted": True}
+    return {"type": "local_reference", "label": source}
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def schedule_background_response(

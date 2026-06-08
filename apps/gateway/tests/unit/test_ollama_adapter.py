@@ -25,6 +25,8 @@ async def test_ollama_list_models_uses_models_endpoint():
         "object": "list",
         "data": [{"id": "gpt-oss:120b", "object": "model", "created": 123, "owned_by": "ollama"}],
     }
+    metrics = generate_latest().decode()
+    assert 'gateway_backend_model_info{backend="ollama",model="gpt-oss:120b"} 1.0' in metrics
 
 
 @pytest.mark.asyncio
@@ -74,6 +76,20 @@ async def test_ollama_reasoning_maps_to_think_and_usage_details():
     assert result.content == "ciao"
     assert result.reasoning == "check the prompt carefully"
     assert result.usage["output_tokens_details"]["reasoning_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_ollama_reasoning_xhigh_maps_to_high_think_level():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["think"] == "high"
+        return httpx.Response(200, json={"message": {"role": "assistant", "thinking": "deep check", "content": "ok"}, "prompt_eval_count": 1, "eval_count": 2})
+
+    adapter = OllamaBackend("http://ollama.test/v1", 10, transport=httpx.MockTransport(handler))
+    result = await adapter.create_chat_completion({"model": "gpt-oss:120b", "messages": [], "reasoning": {"effort": "xhigh"}})
+
+    assert result.content == "ok"
+    assert result.reasoning == "deep check"
 
 
 @pytest.mark.asyncio
@@ -230,6 +246,9 @@ async def test_ollama_streaming_maps_jsonl_chunks_and_native_usage():
         {"type": "done", "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}},
     ]
     metrics = generate_latest().decode()
+    assert 'gateway_backend_eval_tokens_total{backend="ollama",model="gpt-oss:120b",operation="chat_completion_stream",phase="prefill"}' in metrics
+    assert 'gateway_backend_eval_duration_seconds_total{backend="ollama",model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"}' in metrics
+    assert 'gateway_backend_eval_tokens_per_second{backend="ollama",model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"} 10.0' in metrics
     assert 'gateway_ollama_eval_tokens_total{model="gpt-oss:120b",operation="chat_completion_stream",phase="prefill"}' in metrics
     assert 'gateway_ollama_eval_duration_seconds_total{model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"}' in metrics
     assert 'gateway_ollama_eval_tokens_per_second{model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"} 10.0' in metrics

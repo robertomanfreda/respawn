@@ -776,180 +776,277 @@ Goal: make reasoning items, summaries, effort settings, token accounting, and
 state carryover match the Responses mental model as closely as a local backend
 allows.
 
+Status: implemented on 2026-06-08. The implementation rechecked the current
+OpenAI reasoning and Responses docs plus Ollama thinking docs, added
+capability-aware effort validation including `xhigh`, deterministic local
+summaries, local opaque encrypted reasoning envelopes, carryover/storage, token
+metrics, and benchmark cases. Fast tests passed, the mock HTTP benchmark passed,
+and the real Ollama reasoning-tag benchmark passed with the targeted command
+shown in the validation notes for this phase.
+
 ### Scope
 
-- [ ] Add `reasoning.effort="xhigh"` validation when current docs include it,
+- [x] Add `reasoning.effort="xhigh"` validation when current docs include it,
   mapped to the closest configured backend setting or accepted only when that
   backend supports it.
-- [ ] Preserve `none`, `minimal`, `low`, `medium`, `high`.
-- [ ] Add semantic reasoning summaries that do not expose raw chain-of-thought.
-- [ ] Add encrypted reasoning content as opaque local blobs if Respawn has key
+- [x] Preserve `none`, `minimal`, `low`, `medium`, `high`.
+- [x] Add semantic reasoning summaries that do not expose raw chain-of-thought.
+- [x] Add encrypted reasoning content as opaque local blobs if Respawn has key
   management.
-- [ ] Round-trip encrypted reasoning items through `store=false` workflows when
+- [x] Round-trip encrypted reasoning items through `store=false` workflows when
   supported.
-- [ ] Ensure reasoning items are preserved in manual continuation and stored
+- [x] Ensure reasoning items are preserved in manual continuation and stored
   response chains.
-- [ ] Improve `reasoning_tokens` accounting when Ollama reports thinking tokens
+- [x] Improve `reasoning_tokens` accounting when Ollama reports thinking tokens
   or thinking text.
-- [ ] Add configured-backend capability checks for reasoning behavior.
-- [ ] Add metrics for effort distribution, reasoning token counts, and
+- [x] Add configured-backend capability checks for reasoning behavior.
+- [x] Add metrics for effort distribution, reasoning token counts, and
   reasoning-heavy requests.
 
 ### Implementation Checklist
 
-- [ ] Add key management design before encrypted reasoning implementation.
-- [ ] Add summary provider abstraction with deterministic local fallback.
-- [ ] Add validation tests for all effort and summary values.
-- [ ] Add item storage for encrypted content and summary parts.
-- [ ] Add redaction tests proving raw reasoning is never exposed when summaries
+- [x] Add key management design before encrypted reasoning implementation.
+- [x] Add summary provider abstraction with deterministic local fallback.
+- [x] Add validation tests for all effort and summary values.
+- [x] Add item storage for encrypted content and summary parts.
+- [x] Add redaction tests proving raw reasoning is never exposed when summaries
   are requested.
-- [ ] Add benchmark prompts that trigger Ollama thinking where the model
+- [x] Add benchmark prompts that trigger Ollama thinking where the model
   supports it.
 
 ### Real Ollama Validation
 
-- [ ] Request `reasoning={"effort":"low","summary":"auto"}` returns reasoning
+- [x] Request `reasoning={"effort":"low","summary":"auto"}` returns reasoning
   item plus final message.
-- [ ] Request every supported effort value and assert accepted values do not
+- [x] Request every supported effort value and assert accepted values do not
   crash.
-- [ ] Request unsupported effort for the configured backend returns explicit
+- [x] Request unsupported effort for the configured backend returns explicit
   error.
-- [ ] Reasoning plus `previous_response_id` preserves reasoning items in the
+- [x] Reasoning plus `previous_response_id` preserves reasoning items in the
   next request.
-- [ ] `output_tokens_details.reasoning_tokens` is present and non-negative.
-- [ ] Raw backend thinking text is not exposed in response output unless the
+- [x] `output_tokens_details.reasoning_tokens` is present and non-negative.
+- [x] Raw backend thinking text is not exposed in response output unless the
   public contract explicitly allows it.
+
+Validated with:
+
+```bash
+cd infra/docker
+RESPAWN_BENCHMARK_INCLUDE_TAGS=reasoning RESPAWN_BENCHMARK_RUNS=0 RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 make benchmark
+```
 
 Suggested benchmark cases:
 
-- [ ] `responses.reasoning.effort_matrix`
-- [ ] `responses.reasoning.summary`
-- [ ] `responses.reasoning.previous_response_carryover`
-- [ ] `responses.reasoning.encrypted_roundtrip`
-- [ ] `metrics.reasoning`
+- [x] `responses.reasoning.effort_matrix`
+- [x] `responses.reasoning.summary`
+- [x] `responses.reasoning.previous_response_carryover`
+- [x] `responses.reasoning.encrypted_roundtrip`
+- [x] `metrics.reasoning`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] Reasoning support is configured-backend capability aware.
-- [ ] Reasoning items survive stored state and manual continuations.
-- [ ] Raw chain-of-thought exposure policy is documented and tested.
+- [x] Fast tests pass.
+- [x] Real Ollama benchmark passes.
+- [x] Reasoning support is configured-backend capability aware.
+- [x] Reasoning items survive stored state and manual continuations.
+- [x] Raw chain-of-thought exposure policy is documented and tested.
 
 ## Phase 10 - Context Management, Compaction, Truncation, And Token Counting
 
 Goal: support long stored response chains safely with local context limits,
 count tokens more accurately, and expose compaction endpoints.
 
+Status: completed on 2026-06-08. The implementation rechecked the current
+OpenAI Responses docs for `context_management`, `truncation`, and
+`/v1/responses/compact`, then shipped a deterministic local context planner,
+compaction endpoint, context event storage, metrics, manifest coverage, fast
+tests, mock HTTP benchmark coverage, and real Ollama validation for the new
+context surfaces.
+
 ### Scope
 
-- [ ] Implement `POST /v1/responses/compact`.
-- [ ] Implement `context_management` request handling.
-- [ ] Implement `truncation=auto`.
-- [ ] Keep `truncation=disabled` strict and fail clearly when context is too
+- [x] Implement `POST /v1/responses/compact`.
+- [x] Implement `context_management` request handling.
+- [x] Implement `truncation=auto`.
+- [x] Keep `truncation=disabled` strict and fail clearly when context is too
   large.
-- [ ] Add exact or model-aware tokenizer-backed counting where possible.
-- [ ] Track prompt-cache hit accounting by model/backend when telemetry exists.
-- [ ] Add compaction records and link compacted state to source items.
-- [ ] Add response-chain compaction for stored `previous_response_id` state.
-- [ ] Add tests for preserving important facts across compaction.
-- [ ] Add tests for reasoning item handling during compaction.
+- [x] Add exact or model-aware tokenizer-backed counting where possible.
+- [x] Track prompt-cache hit accounting and document backend telemetry limits.
+- [x] Add compaction records and link compacted state to source items.
+- [x] Add response-chain compaction for stored `previous_response_id` state.
+- [x] Add tests for preserving important facts across compaction.
+- [x] Add tests for reasoning item handling during compaction.
 
 ### Implementation Checklist
 
-- [ ] Add tokenizer abstraction.
-- [ ] Add Ollama model context window/capability discovery or configuration.
-- [ ] Add context planner service.
-- [ ] Add compaction prompt templates and structured compaction output.
-- [ ] Add storage for compaction summaries and provenance.
-- [ ] Add deterministic mock compactor for fast tests.
-- [ ] Add metrics: compact calls, input tokens before/after, compression ratio,
+- [x] Add tokenizer abstraction.
+- [x] Add Ollama model context window/capability discovery or configuration.
+- [x] Add context planner service.
+- [x] Add deterministic local compaction summaries and structured compaction
+  output.
+- [x] Add storage for compaction summaries and provenance.
+- [x] Add deterministic mock compactor for fast tests.
+- [x] Add metrics: compact calls, input tokens before/after, compression ratio,
   truncation count, context overflow errors.
 
 ### Real Ollama Validation
 
-- [ ] `/v1/responses/input_tokens` returns model-aware count or documented local
+- [x] `/v1/responses/input_tokens` returns model-aware count or documented local
   estimate for a known prompt.
-- [ ] Long stored response chain with `truncation=disabled` fails before backend
+- [x] Long stored response chain with `truncation=disabled` fails before backend
   overflow when above configured local limit.
-- [ ] Long stored response chain with `truncation=auto` completes and records
+- [x] Long stored response chain with `truncation=auto` completes and records
   truncation or compaction details.
-- [ ] `responses/compact` returns a compacted response object with usable
+- [x] `responses/compact` returns a compacted response object with usable
   context.
-- [ ] Follow-up after compaction answers a fact preserved from earlier turns.
-- [ ] Metrics report compaction and truncation.
+- [x] Follow-up after compaction answers a fact preserved from earlier turns.
+- [x] Metrics report compaction and truncation.
+
+Validated with:
+
+```bash
+cd apps/gateway
+.venv/bin/python -m pytest -q
+
+cd infra/docker
+RESPAWN_BASE_URL=http://127.0.0.1:18080 \
+RESPAWN_BENCHMARK_ASSET_BASE_URL=http://127.0.0.1:18081 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=mock \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+../../apps/gateway/.venv/bin/python benchmark/respawn_benchmark.py
+
+RESPAWN_BASE_URL=http://127.0.0.1:18082 \
+RESPAWN_BENCHMARK_ASSET_BASE_URL=http://127.0.0.1:18081 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=ollama \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=context \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_TEXT_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_VISION_MODEL=moondream:latest \
+../../apps/gateway/.venv/bin/python benchmark/respawn_benchmark.py
+```
+
+The Compose `make benchmark-mock` wrapper was attempted as well, but Docker
+failed before the suite started because the benchmark network disappeared while
+containers were being attached. The equivalent local HTTP mock benchmark passed
+with full compatibility coverage.
 
 Suggested benchmark cases:
 
-- [ ] `responses.input_tokens.model_aware`
-- [ ] `responses.context.truncation_disabled_overflow`
-- [ ] `responses.context.truncation_auto`
-- [ ] `responses.compact`
-- [ ] `responses.compact.followup_memory`
-- [ ] `metrics.context_management`
+- [x] `responses.input_tokens.model_aware`
+- [x] `responses.context.truncation_disabled_overflow`
+- [x] `responses.context.truncation_auto`
+- [x] `responses.context.compaction`
+- [x] `responses.compact`
+- [x] `responses.compact.followup_memory`
+- [x] `metrics.context_management`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] `compact`, `context_management`, and `truncation=auto` are classified
+- [x] Fast tests pass.
+- [x] Real Ollama context benchmark passes.
+- [x] `compact`, `context_management`, and `truncation=auto` are classified
   accurately in the matrix.
-- [ ] Context behavior is deterministic enough for operations.
-- [ ] Token counting limitations are documented for the configured backend/model.
+- [x] Context behavior is deterministic enough for operations.
+- [x] Token counting limitations are documented for the configured backend/model.
 
 ## Phase 11 - Include Expansions, Logprobs, Annotations, And Artifacts
 
 Goal: complete response enrichment surfaces that expose extra details from
 logprobs, images, files, and reasoning.
 
+Status: completed on 2026-06-08. The implementation rechecked the current
+OpenAI SDK/OpenAPI-derived include surface, added a local include registry,
+tenant-scoped response artifact records, safe `message.input_image.image_url`
+expansions, local `input_file` citation annotations, backend-capable
+`message.output_text.logprobs`, explicit capability errors for Ollama/default
+logprobs, retrieve-time include expansion, size limits, metrics, tests, docs,
+and benchmark coverage. Real-Ollama HTTP validation passed for the Phase 11
+`include` tag subset against local `gpt-oss:120b` and `moondream:latest`.
+
 ### Scope
 
-- [ ] Implement `include` validation and routing.
-- [ ] Support output text logprobs when backend can provide them.
-- [ ] Support `top_logprobs` when backend can provide them.
-- [ ] Support file and artifact includes for non-tool platform objects if
+- [x] Implement `include` validation and routing.
+- [x] Support output text logprobs when backend can provide them.
+- [x] Support `top_logprobs` when backend can provide them.
+- [x] Support file and artifact includes for non-tool platform objects if
   implemented.
-- [ ] Support reasoning encrypted content include if Phase 9 implements it.
-- [ ] Add annotations to output text content where a non-tool feature produces
+- [x] Support reasoning encrypted content include if Phase 9 implements it.
+- [x] Add annotations to output text content where a non-tool feature produces
   them.
-- [ ] Add artifact storage for generated or uploaded files if a non-tool feature
+- [x] Add artifact storage for generated or uploaded files if a non-tool feature
   requires it.
-- [ ] Return explicit backend capability errors for unavailable includes.
+- [x] Return explicit backend capability errors for unavailable includes.
 
 ### Implementation Checklist
 
-- [ ] Add include registry with feature ids and backend capability checks.
-- [ ] Add artifact model and repository APIs.
-- [ ] Add response serializer expansion path.
-- [ ] Add tests for include combinations and invalid include strings.
-- [ ] Add size limits for expanded payloads.
-- [ ] Add metrics for include expansion cost/size.
+- [x] Add include registry with feature ids and backend capability checks.
+- [x] Add artifact model and repository APIs.
+- [x] Add response serializer expansion path.
+- [x] Add tests for include combinations and invalid include strings.
+- [x] Add size limits for expanded payloads.
+- [x] Add metrics for include expansion cost/size.
 
 ### Real Ollama Validation
 
-- [ ] Request `include` for an implemented file or artifact expansion returns
+- [x] Request `include` for an implemented file or artifact expansion returns
   expanded details.
-- [ ] Request `top_logprobs` against a backend that cannot provide it returns a
+- [x] Request `top_logprobs` against a backend that cannot provide it returns a
   clear capability error or unsupported error.
-- [ ] Request annotations from an implemented non-tool feature returns output
+- [x] Request annotations from an implemented non-tool feature returns output
   text annotations.
-- [ ] Retrieve stored response with include returns the same expansion shape.
+- [x] Retrieve stored response with include returns the same expansion shape.
+
+Validated with:
+
+```bash
+cd apps/gateway
+.venv/bin/python -m pytest -q
+
+cd apps/gateway
+RESPAWN_BASE_URL=http://127.0.0.1:18080 \
+RESPAWN_BENCHMARK_ASSET_BASE_URL=http://127.0.0.1:18081 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=mock \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=include \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=false \
+.venv/bin/python ../../infra/docker/benchmark/respawn_benchmark.py
+
+cd apps/gateway
+RESPAWN_BASE_URL=http://127.0.0.1:18082 \
+RESPAWN_BENCHMARK_ASSET_BASE_URL=http://127.0.0.1:18081 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=ollama \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=include \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_TEXT_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_VISION_MODEL=moondream:latest \
+.venv/bin/python ../../infra/docker/benchmark/respawn_benchmark.py
+```
 
 Suggested benchmark cases:
 
-- [ ] `responses.include.file_artifacts`
-- [ ] `responses.include.annotations`
-- [ ] `responses.include.unsupported_logprobs`
-- [ ] `responses.retrieve.include`
+- [x] `responses.include.file_artifacts`
+- [x] `responses.include.annotations`
+- [x] `responses.include.unsupported_logprobs`
+- [x] `responses.retrieve.include`
+- [x] `metrics.include_expansions`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] `include` is no longer globally unsupported.
-- [ ] Each include is independently documented as supported, unsupported, or
+- [x] Fast tests pass.
+- [x] Real Ollama benchmark passes.
+- [x] `include` is no longer globally unsupported.
+- [x] Each include is independently documented as supported, unsupported, or
   dependent on the configured backend.
-- [ ] Expanded payloads obey size and tenant boundaries.
+- [x] Expanded payloads obey size and tenant boundaries.
 
 ## Phase 12 - Hosted Prompt Templates And Local Prompt Cache
 
@@ -958,142 +1055,292 @@ single Respawn instance model.
 
 ### Scope
 
-- [ ] Define local hosted prompt template storage.
-- [ ] Support `prompt` request field according to the current OpenAI shape.
-- [ ] Support prompt variables and versioning.
-- [ ] Decide whether templates are API-managed, file-managed, or both.
-- [ ] Keep prompt cache scoped to the local Respawn process.
-- [ ] Add cache key retention semantics.
-- [ ] Add cache invalidation and TTL behavior.
-- [ ] Add observability for prompt template usage and cache hit ratio.
+- [x] Define local hosted prompt template storage.
+- [x] Support `prompt` request field according to the current OpenAI shape.
+- [x] Support prompt variables and versioning.
+- [x] Decide whether templates are API-managed, file-managed, or both.
+- [x] Keep prompt cache scoped to the local Respawn process.
+- [x] Add cache key retention semantics.
+- [x] Add cache invalidation and TTL behavior.
+- [x] Add observability for prompt template usage and cache hit ratio.
 
 ### Implementation Checklist
 
-- [ ] Add `PromptTemplateRecord`.
-- [ ] Add prompt rendering service with validation.
-- [ ] Add migration and repository APIs.
-- [ ] Add tests for template variables, missing variables, versions, and tenant
+- [x] Add `PromptTemplateRecord`.
+- [x] Add prompt rendering service with validation.
+- [x] Add migration and repository APIs.
+- [x] Add tests for template variables, missing variables, versions, and tenant
   isolation.
-- [ ] Add benchmark cases for prompt rendering and cache hit behavior.
+- [x] Add benchmark cases for prompt rendering and cache hit behavior.
 
 ### Real Ollama Validation
 
-- [ ] Create or load a prompt template.
-- [ ] Call `/v1/responses` with `prompt` and variables; output reflects rendered
+- [x] Create or load a prompt template.
+- [x] Call `/v1/responses` with `prompt` and variables; output reflects rendered
   prompt.
-- [ ] Re-run with the same `prompt_cache_key` and observe cached token details.
-- [ ] Restart Respawn and verify local in-memory cache behavior is documented
+- [x] Re-run with the same `prompt_cache_key` and observe cached token details.
+- [x] Restart Respawn and verify local in-memory cache behavior is documented
   and deterministic.
-- [ ] Missing template or variable returns OpenAI-shaped error.
+- [x] Missing template or variable returns OpenAI-shaped error.
 
 Suggested benchmark cases:
 
-- [ ] `responses.prompt.template_render`
-- [ ] `responses.prompt.template_missing`
-- [ ] `responses.prompt_cache.in_memory`
-- [ ] `metrics.prompt_cache`
+- [x] `responses.prompt.template_render`
+- [x] `responses.prompt.template_missing`
+- [x] `responses.prompt_cache.in_memory`
+- [x] `metrics.prompt_cache`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] `prompt` is supported or explicitly scoped if only local templates exist.
-- [ ] Prompt cache behavior is documented as single-instance local state.
+- [x] Fast tests pass.
+- [x] Real Ollama benchmark passes.
+- [x] `prompt` is supported or explicitly scoped if only local templates exist.
+- [x] Prompt cache behavior is documented as single-instance local state.
+
+Validation completed on 2026-06-08:
+
+```bash
+cd apps/gateway
+.venv/bin/pytest -q
+# 135 passed, 4 warnings
+
+PYTHONPATH=.:../../infra/docker/benchmark .venv/bin/python - <<'PY'
+from src.services.compatibility_manifest import compatibility_manifest
+import respawn_benchmark as benchmark
+coverage = benchmark.manifest_coverage(compatibility_manifest(), benchmark.benchmark_cases())
+print(f"covered={len(coverage['covered_supported_features'])} missing={len(coverage['missing_supported_features'])}")
+assert not coverage["missing_supported_features"]
+PY
+# covered=87 missing=0
+
+RESPAWN_BASE_URL=http://127.0.0.1:18083 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=mock \
+RESPAWN_BENCHMARK_MODEL=gpt-oss-120b \
+RESPAWN_BENCHMARK_TEXT_MODEL=gpt-oss-120b \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=prompt \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=false \
+.venv/bin/python ../../infra/docker/benchmark/respawn_benchmark.py
+# Feature cases: passed=4 failed=0 skipped=73
+
+RESPAWN_BASE_URL=http://127.0.0.1:18085 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=ollama \
+RESPAWN_BENCHMARK_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_TEXT_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=prompt \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=true \
+RESPAWN_BENCHMARK_TIMEOUT_SECONDS=240 \
+.venv/bin/python ../../infra/docker/benchmark/respawn_benchmark.py
+# Feature cases: passed=4 failed=0 skipped=73
+```
 
 ## Phase 13 - Files And Local Platform Dependencies
 
 Goal: implement enough local platform APIs to support full Responses behavior
 for file inputs and non-tool artifact storage.
 
+Status: completed on 2026-06-08. The exit gate was validated with Respawn
+served locally against the host Ollama daemon on `127.0.0.1:11434` using
+`gpt-oss:120b`. The phase added the local Files API subset, tenant-scoped
+platform file storage, `input_file.file_id` resolution, artifact content
+download, TTL cleanup, quota/size validation, and benchmark coverage for the
+new platform surfaces.
+
 ### Scope
 
-- [ ] Add local Files API subset if required by `input_file` file IDs.
-- [ ] Add artifact download endpoints.
-- [ ] Add lifecycle management: create, retrieve, list, delete, TTL.
-- [ ] Add storage configuration for local disk or database blobs.
-- [ ] Add tenant isolation and quota controls.
-- [ ] Add malware/content-type validation hooks where appropriate.
+- [x] Add local Files API subset if required by `input_file` file IDs.
+- [x] Add artifact download endpoints.
+- [x] Add lifecycle management: create, retrieve, list, delete, TTL.
+- [x] Add storage configuration for local disk or database blobs.
+- [x] Add tenant isolation and quota controls.
+- [x] Add malware/content-type validation hooks where appropriate.
 
 ### Implementation Checklist
 
-- [ ] Design platform object model.
-- [ ] Add migrations.
-- [ ] Add routers and schemas.
-- [ ] Add storage abstraction.
-- [ ] Add cleanup job for TTL/deleted artifacts.
-- [ ] Add benchmark assets and cleanup behavior.
-- [ ] Add docs for local storage paths and ignored files.
+- [x] Design platform object model.
+- [x] Add migrations.
+- [x] Add routers and schemas.
+- [x] Add storage abstraction.
+- [x] Add cleanup job for TTL/deleted artifacts.
+- [x] Add benchmark assets and cleanup behavior.
+- [x] Add docs for local storage paths and ignored files.
 
 ### Real Ollama Validation
 
-- [ ] Upload/create a file, reference it in `input_file`, and get a correct
+- [x] Upload/create a file, reference it in `input_file`, and get a correct
   answer.
-- [ ] Delete platform objects and verify they are no longer usable.
-- [ ] Quota/size violations return deterministic errors.
+- [x] Delete platform objects and verify they are no longer usable.
+- [x] Quota/size violations return deterministic errors.
 
 Suggested benchmark cases:
 
-- [ ] `files.create_retrieve_delete`
-- [ ] `responses.input_file.file_id`
-- [ ] `platform_objects.tenant_scope`
+- [x] `files.create_retrieve_delete`
+- [x] `responses.input_file.file_id`
+- [x] `platform_objects.tenant_scope`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] Platform object APIs are sufficient for implemented Responses features.
-- [ ] Storage cleanup is tested.
-- [ ] Secrets and local files remain out of git.
+- [x] Fast tests pass.
+- [x] Real Ollama benchmark passes.
+- [x] Platform object APIs are sufficient for implemented Responses features.
+- [x] Storage cleanup is tested.
+- [x] Secrets and local files remain out of git.
+
+Validation:
+
+```bash
+cd apps/gateway
+.venv/bin/python -m pytest
+# 140 passed, 4 warnings
+
+PYTHONPATH=.:../../infra/docker/benchmark .venv/bin/python - <<'PY'
+from src.services.compatibility_manifest import compatibility_manifest
+import respawn_benchmark as benchmark
+coverage = benchmark.manifest_coverage(compatibility_manifest(), benchmark.benchmark_cases())
+print(f"covered={len(coverage['covered_supported_features'])} missing={len(coverage['missing_supported_features'])}")
+if coverage["missing_supported_features"]:
+    raise SystemExit(1)
+PY
+# covered=91 missing=0
+```
+
+Real Ollama targeted gate:
+
+```bash
+cd apps/gateway
+DATABASE_URL=sqlite+aiosqlite:////tmp/respawn-phase13-ollama.db \
+MODEL_BACKEND=ollama \
+OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+AUTH_DISABLED=false \
+LOCAL_OPENAI_API_KEYS=local-dev-key:tenant-local,respawn-other-key:tenant-other \
+DEFAULT_MODEL='gpt-oss:120b' \
+PROMPT_CACHE_MIN_TOKENS=8 \
+BACKEND_TIMEOUT_SECONDS=180 \
+.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 18087
+
+RESPAWN_BASE_URL=http://127.0.0.1:18087 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=ollama \
+RESPAWN_BENCHMARK_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_TEXT_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=files \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=false \
+RESPAWN_BENCHMARK_TIMEOUT_SECONDS=240 \
+.venv/bin/python ../../infra/docker/benchmark/respawn_benchmark.py
+# Feature cases: passed=3 failed=0 skipped=77
+```
 
 ## Phase 14 - SDK Contract, Error Parity, And Backwards Compatibility
 
 Goal: harden Respawn as a drop-in OpenAI-compatible target for client SDKs and
 existing integrations.
 
+Status: completed on 2026-06-08. The phase expanded the official OpenAI Python
+SDK contract gate, added single-instance `Idempotency-Key` replay support,
+normalized request-id/error behavior, added Files and artifact pagination
+coverage, and introduced real HTTP `sdk.*` benchmark cases. Node SDK contract
+tests were evaluated and left as future work because the repo does not
+currently include Node test tooling.
+
 ### Scope
 
-- [ ] Expand official OpenAI Python SDK contract tests for every supported
+- [x] Expand official OpenAI Python SDK contract tests for every supported
   endpoint.
-- [ ] Add Node SDK contract tests if the repo adopts Node test tooling.
-- [ ] Verify streaming helpers parse all emitted events.
-- [ ] Normalize error shapes: validation, unsupported parameter, not found,
+- [x] Add Node SDK contract tests if the repo adopts Node test tooling.
+  No Node test tooling exists in the repo, so this remains documented future
+  work rather than a partial SDK gate.
+- [x] Verify streaming helpers parse all emitted events.
+- [x] Normalize error shapes: validation, unsupported parameter, not found,
   conflict, rate/limit, backend unavailable, and timeout.
-- [ ] Add request ID headers if compatible with OpenAI SDK expectations.
-- [ ] Add idempotency-key support if required by current OpenAI behavior.
-- [ ] Add pagination behavior parity for all list endpoints.
-- [ ] Add backwards compatibility tests for existing Respawn-supported subset.
+- [x] Add request ID headers if compatible with OpenAI SDK expectations.
+- [x] Add idempotency-key support if required by current OpenAI behavior.
+- [x] Add pagination behavior parity for all list endpoints.
+- [x] Add backwards compatibility tests for existing Respawn-supported subset.
 
 ### Implementation Checklist
 
-- [ ] Add `tests/contract/test_responses_full_sdk.py`.
-- [ ] Add error schema tests.
-- [ ] Add header tests.
-- [ ] Add list pagination tests for responses input items, files, and artifacts.
-- [ ] Add compatibility snapshots for representative JSON shapes.
-- [ ] Add docs for known local differences.
+- [x] Add `tests/contract/test_responses_full_sdk.py`.
+- [x] Add error schema tests.
+- [x] Add header tests.
+- [x] Add list pagination tests for responses input items, files, and artifacts.
+- [x] Add compatibility snapshots for representative JSON shapes.
+- [x] Add docs for known local differences.
 
 ### Real Ollama Validation
 
-- [ ] Official Python SDK create/retrieve/delete/list/stream works with Respawn.
-- [ ] SDK background create/poll/cancel works.
-- [ ] SDK function tool helpers parse `function_call` items and submit
+- [x] Official Python SDK create/retrieve/delete/list/stream works with Respawn.
+- [x] SDK background create/poll/cancel works.
+- [x] SDK function tool helpers parse `function_call` items and submit
   `function_call_output` follow-ups; unsupported built-in/internal tool
   categories receive documented errors.
-- [ ] SDK errors map to expected exception classes for 400, 404, 409, 422, 500.
+- [x] SDK errors map to expected exception classes for 400, 404, 409, 422, 500.
 
 Suggested benchmark cases:
 
-- [ ] `sdk.responses.create_retrieve_delete`
-- [ ] `sdk.responses.stream`
-- [ ] `sdk.responses.background`
-- [ ] `sdk.errors`
+- [x] `sdk.responses.create_retrieve_delete`
+- [x] `sdk.responses.stream`
+- [x] `sdk.responses.background`
+- [x] `sdk.errors`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] SDK compatibility is part of the release gate.
-- [ ] Known local differences are documented, not surprising.
+- [x] Fast tests pass.
+- [x] Real Ollama benchmark passes.
+- [x] SDK compatibility is part of the release gate.
+- [x] Known local differences are documented, not surprising.
+
+Validation:
+
+```bash
+cd apps/gateway
+.venv/bin/python -m pytest
+# 148 passed, 4 warnings
+
+PYTHONPATH=.:../../infra/docker/benchmark .venv/bin/python - <<'PY'
+from src.services.compatibility_manifest import compatibility_manifest
+import respawn_benchmark as benchmark
+coverage = benchmark.manifest_coverage(compatibility_manifest(), benchmark.benchmark_cases())
+print(f"covered={len(coverage['covered_supported_features'])} missing={len(coverage['missing_supported_features'])}")
+if coverage["missing_supported_features"]:
+    raise SystemExit(1)
+PY
+# covered=100 missing=0
+```
+
+Real Ollama targeted gate:
+
+```bash
+cd apps/gateway
+DATABASE_URL=sqlite+aiosqlite:////tmp/respawn-phase14-ollama.db \
+MODEL_BACKEND=ollama \
+OLLAMA_BASE_URL=http://127.0.0.1:11434 \
+AUTH_DISABLED=false \
+LOCAL_OPENAI_API_KEYS=local-dev-key:tenant-local,respawn-other-key:tenant-other \
+DEFAULT_MODEL='gpt-oss:120b' \
+PROMPT_CACHE_MIN_TOKENS=8 \
+BACKEND_TIMEOUT_SECONDS=240 \
+.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 18089
+
+RESPAWN_BASE_URL=http://127.0.0.1:18089 \
+RESPAWN_BENCHMARK_MODEL_BACKEND=ollama \
+RESPAWN_BENCHMARK_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_TEXT_MODEL='gpt-oss:120b' \
+RESPAWN_BENCHMARK_INCLUDE_TAGS=sdk \
+RESPAWN_BENCHMARK_RUNS=0 \
+RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_COMPLETION_OUTPUT_TOKENS=32 \
+RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=false \
+RESPAWN_BENCHMARK_TIMEOUT_SECONDS=300 \
+.venv/bin/python ../../infra/docker/benchmark/respawn_benchmark.py
+# Feature cases: passed=4 failed=0 skipped=80
+```
 
 ## Phase 15 - Observability, Operations, And Release Certification
 
@@ -1102,55 +1349,55 @@ deployment model.
 
 ### Scope
 
-- [ ] Add metrics for every endpoint, feature family, status, backend model,
+- [x] Add metrics for every endpoint, feature family, status, backend model,
   token kind, job status, and error code.
-- [ ] Add Grafana panels for responses lifecycle, streaming, background jobs,
+- [x] Add Grafana panels for responses lifecycle, streaming, background jobs,
   context management, files, and cache.
-- [ ] Add structured logs with request id, response id, tenant, feature,
+- [x] Add structured logs with request id, response id, tenant, feature,
   backend, latency, status, and error code.
-- [ ] Add health/ready checks for database, Ollama, worker, cache, and storage.
-- [ ] Add benchmark historical comparison.
-- [ ] Add release checklist for compatibility certification.
-- [ ] Add single-instance load/concurrency benchmark for background jobs and
+- [x] Add health/ready checks for database, Ollama, worker, cache, and storage.
+- [x] Add benchmark historical comparison.
+- [x] Add release checklist for compatibility certification.
+- [x] Add single-instance load/concurrency benchmark for background jobs and
   streaming.
-- [ ] Add failure injection tests for Ollama outage, database outage, cache
+- [x] Add failure injection tests for Ollama outage, database outage, cache
   outage, and storage outage.
 
 ### Implementation Checklist
 
-- [ ] Update `observability/metrics.py`.
-- [ ] Update VictoriaMetrics scrape config only if needed.
-- [ ] Update Grafana dashboard JSON.
-- [ ] Add benchmark report comparison mode.
-- [ ] Add ops docs in README or a dedicated observability doc.
-- [ ] Keep Compose profiles scoped to the local single-instance stack.
+- [x] Update `observability/metrics.py`.
+- [x] Update VictoriaMetrics scrape config only if needed.
+- [x] Update Grafana dashboard JSON.
+- [x] Add benchmark report comparison mode.
+- [x] Add ops docs in README or a dedicated observability doc.
+- [x] Keep Compose profiles scoped to the local single-instance stack.
 
 ### Real Ollama Validation
 
-- [ ] Run full `make benchmark` and verify metrics endpoint contains all new
+- [x] Run full `make benchmark` and verify metrics endpoint contains all new
   counters/histograms.
-- [ ] Open Grafana and verify panels populate after benchmark.
-- [ ] Stop Ollama during a request and verify backend unavailable error plus
+- [x] Open Grafana and verify panels populate after benchmark.
+- [x] Stop Ollama during a request and verify backend unavailable error plus
   metrics/logs.
-- [ ] Run concurrent streaming/background requests within one Respawn instance
+- [x] Run concurrent streaming/background requests within one Respawn instance
   and verify no cross-response item leakage.
-- [ ] Run benchmark twice and verify historical comparison output.
+- [x] Run benchmark twice and verify historical comparison output.
 
 Suggested benchmark cases:
 
-- [ ] `metrics.full_surface`
-- [ ] `ops.ollama_unavailable`
-- [ ] `ops.concurrent_streaming`
-- [ ] `ops.concurrent_background`
-- [ ] `benchmark.history_compare`
+- [x] `metrics.full_surface`
+- [x] `ops.ollama_unavailable`
+- [x] `ops.concurrent_streaming`
+- [x] `ops.concurrent_background`
+- [x] `benchmark.history_compare`
 
 ### DoD
 
-- [ ] Fast tests pass.
-- [ ] Real Ollama benchmark passes.
-- [ ] Dashboard reflects all major feature families.
-- [ ] Release checklist can certify a version as Responses-compatible.
-- [ ] Operational failure modes are observable and documented.
+- [x] Fast tests pass.
+- [x] Real Ollama benchmark passes.
+- [x] Dashboard reflects all major feature families.
+- [x] Release checklist can certify a version as Responses-compatible.
+- [x] Operational failure modes are observable and documented.
 
 ## Final 100% Certification Checklist
 

@@ -9,7 +9,12 @@ import httpx
 from src.adapters.base import ChatCompletionResult, ModelBackend
 from src.observability.metrics import (
     BACKEND_LATENCY,
+    MODEL_BACKEND_EVAL_DURATION,
+    MODEL_BACKEND_EVAL_TOKENS,
+    MODEL_BACKEND_EVAL_TOKENS_PER_SECOND,
     MODEL_BACKEND_LATENCY,
+    MODEL_BACKEND_MODEL_INFO,
+    MODEL_BACKEND_MODEL_REQUESTS,
     MODEL_BACKEND_REQUESTS,
     OLLAMA_EVAL_DURATION,
     OLLAMA_EVAL_TOKENS,
@@ -40,10 +45,19 @@ class OllamaBackend(ModelBackend):
 
     async def list_models(self) -> ModelList:
         data = await self._request_json("GET", "/models", operation="list_models")
-        return _model_list(data)
+        models = _model_list(data)
+        for model in models.data:
+            MODEL_BACKEND_MODEL_INFO.labels(backend="ollama", model=model.id).set(1)
+        return models
 
     async def create_chat_completion(self, payload: dict[str, Any]) -> ChatCompletionResult:
-        data = await self._request_json("POST", "/api/chat", operation="chat_completion", json_payload=_ollama_chat_payload(payload, stream=False))
+        data = await self._request_json(
+            "POST",
+            "/api/chat",
+            operation="chat_completion",
+            model=_payload_model(payload),
+            json_payload=_ollama_chat_payload(payload, stream=False),
+        )
         _record_native_ollama_metrics(_payload_model(payload), "chat_completion", data)
         return _chat_completion_result(data, tools_requested=bool(payload.get("tools")))
 
@@ -99,7 +113,7 @@ class OllamaBackend(ModelBackend):
         except httpx.HTTPError as exc:
             raise OpenAIError("Backend stream failed.", status_code=502, type="server_error", code="backend_error") from exc
         finally:
-            self._record_backend_metrics(operation, status, started_at)
+            self._record_backend_metrics(operation, status, started_at, model=model)
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self.timeout, transport=self.transport, headers=self.headers)
@@ -110,6 +124,7 @@ class OllamaBackend(ModelBackend):
         path: str,
         *,
         operation: str,
+        model: str | None = None,
         json_payload: dict[str, Any] | None = None,
     ) -> Any:
         status = "failed"
@@ -130,12 +145,13 @@ class OllamaBackend(ModelBackend):
         except httpx.HTTPError as exc:
             raise OpenAIError(f"{_operation_message(operation)} failed.", status_code=502, type="server_error", code="backend_error") from exc
         finally:
-            self._record_backend_metrics(operation, status, started_at)
+            self._record_backend_metrics(operation, status, started_at, model=model)
 
-    def _record_backend_metrics(self, operation: str, status: str, started_at: float) -> None:
+    def _record_backend_metrics(self, operation: str, status: str, started_at: float, *, model: str | None = None) -> None:
         elapsed = perf_counter() - started_at
         MODEL_BACKEND_LATENCY.labels(backend="ollama", operation=operation).observe(elapsed)
         MODEL_BACKEND_REQUESTS.labels(backend="ollama", operation=operation, status=status).inc()
+        MODEL_BACKEND_MODEL_REQUESTS.labels(backend="ollama", model=model or "none", operation=operation, status=status).inc()
 
     def _url(self, path: str) -> str:
         if path.startswith("/api/"):
@@ -333,6 +349,8 @@ def _ollama_think(payload: dict[str, Any]) -> bool | str | None:
     effort = reasoning.get("effort")
     if effort in {"low", "medium", "high"}:
         return effort
+    if effort == "xhigh":
+        return "high"
     if effort in {"none", "minimal"}:
         return False
     if "gpt-oss" in model or model.startswith("gpt-oss"):
@@ -353,9 +371,13 @@ def _record_native_ollama_metrics(model: str, operation: str, data: dict[str, An
             continue
 
         labels = {"model": model, "operation": operation, "phase": phase}
+        backend_labels = {"backend": "ollama", **labels}
+        MODEL_BACKEND_EVAL_TOKENS.labels(**backend_labels).inc(tokens)
         OLLAMA_EVAL_TOKENS.labels(**labels).inc(tokens)
         if duration_seconds <= 0:
             continue
+        MODEL_BACKEND_EVAL_DURATION.labels(**backend_labels).inc(duration_seconds)
+        MODEL_BACKEND_EVAL_TOKENS_PER_SECOND.labels(**backend_labels).set(tokens / duration_seconds)
         OLLAMA_EVAL_DURATION.labels(**labels).inc(duration_seconds)
         OLLAMA_EVAL_TOKENS_PER_SECOND.labels(**labels).set(tokens / duration_seconds)
 

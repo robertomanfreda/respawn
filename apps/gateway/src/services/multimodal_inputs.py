@@ -14,6 +14,9 @@ import httpx
 from src.config import Settings
 from src.schemas.errors import OpenAIError
 from src.schemas.responses import ResponseRequest
+from src.services.model_capabilities import capabilities_for_model, model_capabilities
+from src.services.platform_files import INPUT_FILE_PURPOSES, PlatformFileStorage
+from src.storage.repository import ResponseRepository
 
 
 TEXT_EXTENSIONS = {
@@ -66,14 +69,21 @@ TEXT_MIME_TYPES = {
 DATA_URL_RE = re.compile(r"^data:(?P<mime>[^;,]+)?(?P<base64>;base64)?,(?P<data>.*)$", re.DOTALL)
 
 
-async def prepare_multimodal_request(request: ResponseRequest, *, model: str, settings: Settings) -> ResponseRequest:
+async def prepare_multimodal_request(
+    request: ResponseRequest,
+    *,
+    model: str,
+    settings: Settings,
+    repository: ResponseRepository | None = None,
+    tenant_id: str | None = None,
+) -> ResponseRequest:
     """Normalize supported image/file inputs before storage and backend calls."""
 
     input_value = request.input
     if not isinstance(input_value, list):
         return request
 
-    caps = _capabilities_for_model(model, settings)
+    caps = capabilities_for_model(model, settings)
     needs_image = _contains_part_type(input_value, "input_image")
     needs_file = _contains_part_type(input_value, "input_file")
     if _contains_part_type(input_value, "input_audio"):
@@ -94,7 +104,7 @@ async def prepare_multimodal_request(request: ResponseRequest, *, model: str, se
     normalized = []
     changed = False
     for index, item in enumerate(input_value):
-        next_item, item_changed = await _normalize_input_item(item, settings=settings, param=f"input.{index}")
+        next_item, item_changed = await _normalize_input_item(item, settings=settings, repository=repository, tenant_id=tenant_id, param=f"input.{index}")
         normalized.append(next_item)
         changed = changed or item_changed
     if not changed:
@@ -102,76 +112,94 @@ async def prepare_multimodal_request(request: ResponseRequest, *, model: str, se
     return request.model_copy(update={"input": normalized})
 
 
-def model_capabilities(settings: Settings) -> dict[str, set[str]]:
-    capabilities: dict[str, set[str]] = {}
-    for entry in settings.model_capabilities.split(";"):
-        entry = entry.strip()
-        if not entry or "=" not in entry:
-            continue
-        model, values = entry.split("=", 1)
-        capabilities[model.strip().lower()] = {value.strip().lower() for value in values.split(",") if value.strip()}
-    return capabilities
-
-
-def _capabilities_for_model(model: str, settings: Settings) -> set[str]:
-    configured = model_capabilities(settings)
-    model_key = model.lower()
-    if model_key in configured:
-        return configured[model_key]
-    if ":" in model_key:
-        base = model_key.split(":", 1)[0]
-        if base in configured:
-            return configured[base]
-    return {"text"}
-
-
-async def _normalize_input_item(item: dict[str, Any], *, settings: Settings, param: str) -> tuple[dict[str, Any], bool]:
+async def _normalize_input_item(
+    item: dict[str, Any],
+    *,
+    settings: Settings,
+    repository: ResponseRepository | None,
+    tenant_id: str | None,
+    param: str,
+) -> tuple[dict[str, Any], bool]:
     if not isinstance(item, dict):
         return item, False
     item_type = item.get("type")
     role = item.get("role")
     if item_type in {"input_image", "input_file", "input_audio"}:
-        normalized = await _normalize_content_part(item, settings=settings, param=param)
+        normalized = await _normalize_content_part(item, settings=settings, repository=repository, tenant_id=tenant_id, param=param)
         return normalized, True
     if item_type != "message" and role not in {"user", "assistant", "system", "developer"}:
         return item, False
-    content, changed = await _normalize_content(item.get("content", ""), settings=settings, param=f"{param}.content")
+    content, changed = await _normalize_content(item.get("content", ""), settings=settings, repository=repository, tenant_id=tenant_id, param=f"{param}.content")
     if not changed:
         return item, False
     return {**item, "content": content}, True
 
 
-async def _normalize_content(content: Any, *, settings: Settings, param: str) -> tuple[Any, bool]:
+async def _normalize_content(
+    content: Any,
+    *,
+    settings: Settings,
+    repository: ResponseRepository | None,
+    tenant_id: str | None,
+    param: str,
+) -> tuple[Any, bool]:
     if isinstance(content, list):
         normalized = []
         changed = False
         for index, part in enumerate(content):
             if isinstance(part, dict):
-                next_part = await _normalize_content_part(part, settings=settings, param=f"{param}.{index}")
+                next_part = await _normalize_content_part(part, settings=settings, repository=repository, tenant_id=tenant_id, param=f"{param}.{index}")
                 normalized.append(next_part)
                 changed = changed or next_part is not part
             else:
                 normalized.append(part)
         return normalized, changed
     if isinstance(content, dict):
-        normalized = await _normalize_content_part(content, settings=settings, param=param)
+        normalized = await _normalize_content_part(content, settings=settings, repository=repository, tenant_id=tenant_id, param=param)
         return normalized, normalized is not content
     return content, False
 
 
-async def _normalize_content_part(part: dict[str, Any], *, settings: Settings, param: str) -> dict[str, Any]:
+async def _normalize_content_part(
+    part: dict[str, Any],
+    *,
+    settings: Settings,
+    repository: ResponseRepository | None,
+    tenant_id: str | None,
+    param: str,
+) -> dict[str, Any]:
     part_type = part.get("type")
     if part_type == "input_image":
-        return await _normalize_input_image(part, settings=settings, param=param)
+        return await _normalize_input_image(part, settings=settings, repository=repository, tenant_id=tenant_id, param=param)
     if part_type == "input_file":
-        return await _normalize_input_file(part, settings=settings, param=param)
+        return await _normalize_input_file(part, settings=settings, repository=repository, tenant_id=tenant_id, param=param)
     if part_type == "input_audio":
         _unsupported(f"{param}.type", "Audio input is not supported by Respawn.")
     return part
 
 
-async def _normalize_input_image(part: dict[str, Any], *, settings: Settings, param: str) -> dict[str, Any]:
-    _reject_file_id(part, param)
+async def _normalize_input_image(
+    part: dict[str, Any],
+    *,
+    settings: Settings,
+    repository: ResponseRepository | None,
+    tenant_id: str | None,
+    param: str,
+) -> dict[str, Any]:
+    if part.get("file_id"):
+        file_part = await _platform_file_payload(part, settings=settings, repository=repository, tenant_id=tenant_id, param=param, allowed_purposes={"vision", "user_data"})
+        if not str(file_part["mime_type"]).lower().startswith("image/"):
+            raise OpenAIError("input_image file_id must reference an image MIME type.", param=f"{param}.file_id", code="invalid_image")
+        return {
+            "type": "input_image",
+            "file_id": file_part["file_id"],
+            "image_url": f"file:{file_part['file_id']}",
+            "image_base64": base64.b64encode(file_part["data"]).decode("ascii"),
+            "mime_type": file_part["mime_type"],
+            "size_bytes": len(file_part["data"]),
+            "source": f"file:{file_part['file_id']}",
+            "detail": _image_detail(part.get("detail"), param=param),
+        }
     source = _part_source(part, keys=("image_url", "image_data", "data"))
     payload = await _load_bytes(source, part=part, settings=settings, param=f"{param}.image_url", max_bytes=settings.multimodal_max_image_bytes)
     mime_type = payload["mime_type"] or part.get("mime_type") or mimetypes.guess_type(payload["source_label"])[0] or "application/octet-stream"
@@ -182,12 +210,32 @@ async def _normalize_input_image(part: dict[str, Any], *, settings: Settings, pa
         "image_url": payload["source_label"],
         "image_base64": base64.b64encode(payload["data"]).decode("ascii"),
         "mime_type": mime_type,
+        "size_bytes": len(payload["data"]),
+        "source": payload["source_label"],
         "detail": _image_detail(part.get("detail"), param=param),
     }
 
 
-async def _normalize_input_file(part: dict[str, Any], *, settings: Settings, param: str) -> dict[str, Any]:
-    _reject_file_id(part, param)
+async def _normalize_input_file(
+    part: dict[str, Any],
+    *,
+    settings: Settings,
+    repository: ResponseRepository | None,
+    tenant_id: str | None,
+    param: str,
+) -> dict[str, Any]:
+    if part.get("file_id"):
+        file_part = await _platform_file_payload(part, settings=settings, repository=repository, tenant_id=tenant_id, param=param, allowed_purposes=INPUT_FILE_PURPOSES)
+        text = _extract_file_text(file_part["data"], filename=file_part["filename"], mime_type=str(file_part["mime_type"]), param=param)
+        return {
+            "type": "input_file",
+            "file_id": file_part["file_id"],
+            "filename": file_part["filename"],
+            "mime_type": file_part["mime_type"],
+            "text": text,
+            "size_bytes": len(file_part["data"]),
+            "source": f"file:{file_part['file_id']}",
+        }
     source = _part_source(part, keys=("file_url", "file_data", "data"))
     payload = await _load_bytes(source, part=part, settings=settings, param=f"{param}.file_data", max_bytes=settings.multimodal_max_file_bytes)
     filename = str(part.get("filename") or _filename_from_source(payload["source_label"]) or "input_file")
@@ -317,9 +365,30 @@ def _image_detail(value: Any, *, param: str) -> str:
     return detail
 
 
-def _reject_file_id(part: dict[str, Any], param: str) -> None:
-    if part.get("file_id"):
-        _unsupported(f"{param}.file_id", "input_file/input_image file_id is not supported until Respawn has a local Files API.")
+async def _platform_file_payload(
+    part: dict[str, Any],
+    *,
+    settings: Settings,
+    repository: ResponseRepository | None,
+    tenant_id: str | None,
+    param: str,
+    allowed_purposes: set[str],
+) -> dict[str, Any]:
+    file_id = part.get("file_id")
+    if not isinstance(file_id, str) or not file_id:
+        _unsupported(f"{param}.file_id", "file_id must be a non-empty string.")
+    if repository is None:
+        _unsupported(f"{param}.file_id", "input_file/input_image file_id requires the local Files API resolver.")
+    record = await repository.require_platform_file(file_id, tenant_id, error_param=f"{param}.file_id")
+    if record.purpose not in allowed_purposes:
+        raise OpenAIError("Uploaded file purpose is not valid for this input type.", param=f"{param}.file_id", code="invalid_file_purpose")
+    data = PlatformFileStorage(settings).read(record)
+    return {
+        "file_id": file_id,
+        "filename": str(part.get("filename") or record.filename),
+        "mime_type": part.get("mime_type") or record.mime_type or mimetypes.guess_type(record.filename)[0] or "application/octet-stream",
+        "data": data,
+    }
 
 
 def _contains_part_type(input_value: list[dict[str, Any]], part_type: str) -> bool:

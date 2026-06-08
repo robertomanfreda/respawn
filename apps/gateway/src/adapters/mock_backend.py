@@ -94,6 +94,8 @@ class MockBackend(ModelBackend):
             text = f"Tool result: {tool_text}"
         elif _has_image(messages) and any(word in all_text for word in ("color", "describe", "image")):
             text = "The image contains a red square."
+        elif "preserved marker word" in text.lower() and "amethyst" in all_text:
+            text = "Mock response: amethyst"
         elif "previous file marker word" in text.lower() and "cobalt" in all_text:
             text = "Mock response: cobalt"
         elif "marker word" in all_text:
@@ -128,7 +130,13 @@ class MockBackend(ModelBackend):
         usage: dict[str, Any] = {"input_tokens": in_tokens, "output_tokens": out_tokens, "total_tokens": in_tokens + out_tokens}
         if reasoning:
             usage["output_tokens_details"] = {"reasoning_tokens": len(reasoning.split())}
-        return ChatCompletionResult(content=text, reasoning=reasoning, finish_reason=finish_reason, usage=usage)
+        return ChatCompletionResult(
+            content=text,
+            reasoning=reasoning,
+            finish_reason=finish_reason,
+            usage=usage,
+            content_logprobs=_mock_logprobs(text, int(payload.get("top_logprobs") or 0)) if "top_logprobs" in payload else [],
+        )
 
     async def create_chat_completion_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self.create_chat_completion(payload)
@@ -177,3 +185,14 @@ def _usage(messages: list[dict[str, Any]], content: str) -> dict[str, int]:
     out_tokens = len(content.split())
     in_tokens = len(str(messages).split())
     return {"input_tokens": in_tokens, "output_tokens": out_tokens, "total_tokens": in_tokens + out_tokens}
+
+
+def _mock_logprobs(text: str, top_logprobs: int) -> list[dict[str, Any]]:
+    entries = []
+    for token in text.split():
+        top = [{"token": token, "bytes": list(token.encode("utf-8")), "logprob": -0.01}]
+        for index in range(max(top_logprobs, 0)):
+            alternative = f"{token}_{index + 1}"
+            top.append({"token": alternative, "bytes": list(alternative.encode("utf-8")), "logprob": -1.0 - index})
+        entries.append({"token": token, "bytes": list(token.encode("utf-8")), "logprob": -0.01, "top_logprobs": top[: top_logprobs + 1]})
+    return entries

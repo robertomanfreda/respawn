@@ -16,20 +16,26 @@ multi-replica consistency semantics are out of scope for now.
 
 ## 1. Full Responses Contract
 
-- Implement `include` expansions such as output logprobs, file/artifact
-  details, image URLs, and reasoning encrypted content.
-- Implement `context_management`, hosted prompt templates, service-tier
-  scheduling semantics, and richer truncation behavior.
+- Keep implemented include expansions covered: `reasoning.encrypted_content`,
+  `message.input_image.image_url`, local file-citation annotations, local
+  response artifacts, and backend-capable `message.output_text.logprobs`.
+- Keep local API-managed prompt templates covered; add OpenAI-hosted prompt
+  management parity only if Respawn deliberately adopts an external platform
+  equivalent. Service-tier scheduling semantics and hosted-tool-only include
+  expansions remain future work.
+- Keep Phase 10 context management covered: `context_management` compaction,
+  `truncation=auto`, `/v1/responses/compact`, and context metrics should stay
+  in the compatibility manifest and benchmark suite.
 - Keep prompt caching as local single-instance prefix accounting with clear TTL
-  semantics.
-- Add the `compact` endpoint.
+  semantics until a configured backend exposes exact cache telemetry.
 
 ## 2. Multimodal Inputs
 
 - Keep improving file input extraction beyond the Phase 8 baseline if Respawn
   adopts more local parsers.
-- Add local Files API support for `input_file.file_id` and `input_image.file_id`
-  in the platform dependency phase.
+- Keep the Phase 13 local Files API covered for `input_file.file_id`, storage
+  lifecycle, quota, TTL, and tenant isolation. Add dedicated coverage before
+  broadening the public matrix for other file-backed multimodal paths.
 - Keep `input_audio` explicitly unsupported for now. Audio belongs in a future
   dedicated audio/realtime/transcription decision, not in Phase 8 image/file
   work.
@@ -53,11 +59,12 @@ multi-replica consistency semantics are out of scope for now.
 
 ## 4. Reasoning Support
 
-- Add semantic reasoning summaries that do not expose raw chain-of-thought.
-- Add encrypted reasoning content if Respawn gets a local encryption/key
-  management story that can safely round-trip opaque reasoning items.
-- Keep configured-backend reasoning mappings explicit, starting from Ollama
-  `think`/`message.thinking`.
+- Keep deterministic local reasoning summaries covered so raw backend thinking
+  is never exposed through public summary fields.
+- Keep the local encrypted reasoning envelope and key configuration documented
+  as key rotation or stronger runtime key management is added.
+- Keep configured-backend reasoning mappings explicit, including Ollama
+  `think`/`message.thinking` and model-specific `xhigh` capability flags.
 - Add dashboard panels for reasoning token rate, reasoning-heavy requests, and
   effort distribution.
 
@@ -65,10 +72,13 @@ multi-replica consistency semantics are out of scope for now.
 
 - Broaden first-class item storage beyond the current text/reasoning subset as
   new non-tool item types are supported.
+- Keep local response artifacts tenant-scoped and bounded; binary/blob
+  lifecycle belongs in the local Files/platform object layer instead of
+  expanded include payloads.
 - Persist item status transitions in a way that can power richer
   streaming/replay.
-- Use canonical item storage as the substrate for future compaction and stream
-  resume semantics.
+- Use canonical item storage as the substrate for future stream resume
+  semantics and richer compaction provenance views.
 
 ## 6. Streaming Completeness
 
@@ -86,9 +96,11 @@ multi-replica consistency semantics are out of scope for now.
 ## 7. Response Object Fidelity
 
 - Add richer `incomplete_details` and incomplete status handling.
-- Add annotations/citations to output text when web/file search exists.
-- Add logprobs and `top_logprobs` support if the configured backend can provide
-  them.
+- Add hosted-tool annotations/citations to output text only if web/file search
+  is implemented as an explicit future platform feature.
+- Add Ollama/native `top_logprobs` wiring if the configured backend exposes
+  response-token logprobs; mock/backend-capable non-streaming logprobs are
+  already supported.
 - Add exact tokenizer-backed input token counting per model.
 - Add model-specific cached-token accounting when the configured backend exposes
   exact cache telemetry.
@@ -98,6 +110,9 @@ multi-replica consistency semantics are out of scope for now.
 - Keep `make benchmark` as both a latency benchmark and a feature regression
   suite.
 - Add benchmark scenarios whenever a new Respawn feature lands.
+- Keep the official OpenAI Python SDK contract suite and `sdk.*` benchmark
+  cases in the release gate as the SDK evolves.
+- Add Node SDK contract tests only after the repo adopts Node test tooling.
 - Add optional CI smoke mode using the mock backend so the benchmark can run
   without a local GPU/model.
 - Add historical benchmark comparison once the project has enough stable runs.

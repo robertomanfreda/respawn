@@ -17,8 +17,11 @@ def test_alembic_upgrade_head_applies_initial_schema(tmp_path, monkeypatch):
         tables = {row[0] for row in connection.execute("select name from sqlite_master where type = 'table'")}
         response_item_columns = {row[1] for row in connection.execute("pragma table_info(response_items)")}
         background_job_columns = {row[1] for row in connection.execute("pragma table_info(background_jobs)")}
+        artifact_columns = {row[1] for row in connection.execute("pragma table_info(response_artifacts)")}
+        prompt_template_columns = {row[1] for row in connection.execute("pragma table_info(prompt_templates)")}
+        platform_file_columns = {row[1] for row in connection.execute("pragma table_info(platform_files)")}
 
-    assert {"responses", "response_items", "tool_calls", "usage_records", "background_jobs"}.issubset(tables)
+    assert {"responses", "response_items", "tool_calls", "usage_records", "background_jobs", "response_artifacts", "prompt_templates", "platform_files"}.issubset(tables)
     assert {
         "input_index",
         "output_index",
@@ -40,6 +43,43 @@ def test_alembic_upgrade_head_applies_initial_schema(tmp_path, monkeypatch):
         "completed_at",
         "error_json",
     }.issubset(background_job_columns)
+    assert {
+        "response_id",
+        "item_id",
+        "content_index",
+        "type",
+        "filename",
+        "mime_type",
+        "size_bytes",
+        "source_json",
+        "metadata_json",
+        "content_json",
+        "tenant_id",
+    }.issubset(artifact_columns)
+    assert {
+        "record_id",
+        "prompt_id",
+        "version",
+        "template_json",
+        "metadata_json",
+        "tenant_id",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    }.issubset(prompt_template_columns)
+    assert {
+        "filename",
+        "purpose",
+        "bytes",
+        "mime_type",
+        "sha256",
+        "storage_backend",
+        "storage_path",
+        "content_bytes",
+        "tenant_id",
+        "expires_at",
+        "deleted_at",
+    }.issubset(platform_file_columns)
 
 
 def test_response_item_state_migration_backfills_supported_legacy_rows(tmp_path, monkeypatch):
