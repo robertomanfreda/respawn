@@ -5,7 +5,7 @@ from typing import Any
 
 
 MANIFEST_VERSION = "phase-15"
-MANIFEST_SOURCE = "docs/RESPONSES_COMPATIBILITY.md"
+MANIFEST_SOURCE = "docs/COMPATIBILITY.md"
 
 
 FEATURES: list[dict[str, Any]] = [

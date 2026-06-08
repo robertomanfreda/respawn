@@ -136,8 +136,8 @@ Before tagging a Responses-compatible release:
   `benchmark.history_compare`.
 - Open Grafana after the benchmark and verify the major panels are populated.
 - Compare the benchmark report to the previous release candidate.
-- Review `docs/RESPONSES_COMPATIBILITY.md` and
-  `docs/RESPONSES_100_ROADMAP.md` for agreement with the manifest version.
+- Review `docs/COMPATIBILITY.md` for agreement with the manifest version and
+  benchmark coverage report.
 - Record any deliberate incompatibility as an explicit unsupported feature, not
   as silent behavior.
 

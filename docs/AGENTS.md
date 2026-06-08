@@ -30,9 +30,8 @@ Main areas:
   make unsupported behavior explicit instead of adding silent no-ops.
 - When changing public API behavior, update schemas, tests, README examples, and
   the benchmark suite together.
-- When changing Responses compatibility, update
-  [`RESPONSES_COMPATIBILITY.md`](RESPONSES_COMPATIBILITY.md); when documenting
-  not-yet-supported work, update [`FUTURE_WORK.md`](FUTURE_WORK.md).
+- When changing Responses compatibility, update the machine-readable manifest,
+  [`COMPATIBILITY.md`](COMPATIBILITY.md), tests, and benchmark coverage together.
 - When adding or renaming metrics, update VictoriaMetrics/Grafana provisioning
   and the dashboard JSON in the same change.
 
@@ -87,8 +86,9 @@ When expanding Responses compatibility:
 - Treat function tools as protocol data only. Do not add filesystem, shell, git,
   `apply_patch`, workspace, MCP-hosting, or other local tool execution inside
   Respawn.
-- Keep the support matrix in [`RESPONSES_COMPATIBILITY.md`](RESPONSES_COMPATIBILITY.md) accurate.
-- Keep major gaps and roadmap notes in [`FUTURE_WORK.md`](FUTURE_WORK.md).
+- Keep the support matrix in [`COMPATIBILITY.md`](COMPATIBILITY.md) accurate.
+- Record deliberate gaps as explicit unsupported manifest rows, not as a
+  separate roadmap document.
 - Add focused tests under `apps/gateway/tests`.
 - Add benchmark coverage under `infra/docker/benchmark`.
 - Keep Ollama-specific translation inside `apps/gateway/src/adapters`.

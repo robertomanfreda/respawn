@@ -60,7 +60,7 @@ def test_responses_compatibility_manifest_is_machine_readable(client):
     body = response.json()
     assert body["object"] == "respawn.responses_compatibility_manifest"
     assert body["version"]
-    assert body["source"] == "docs/RESPONSES_COMPATIBILITY.md"
+    assert body["source"] == "docs/COMPATIBILITY.md"
     assert body["summary"]["supported"] > 0
     assert body["summary"]["unsupported"] > 0
     feature_ids = {feature["id"] for feature in body["features"]}
