@@ -60,6 +60,13 @@ cd infra/docker
 make benchmark
 ```
 
+Full real Ollama release gate:
+
+```bash
+cd infra/docker
+make benchmark-real
+```
+
 The benchmark must always call Respawn HTTP endpoints, not Ollama or internal
 Python services directly. It is both a timing benchmark and a feature regression
 suite. Whenever Respawn gains, removes, or changes a user-visible feature, update

@@ -3,8 +3,11 @@ COMPOSE = docker compose --env-file $(ENV_FILE)
 BASE_FILES = -f docker-compose.yml
 BENCHMARK_FILES = -f docker-compose.yml -f docker-compose.benchmark.yml
 BENCHMARK_MOCK_FILES = -f docker-compose.benchmark.mock.yml
+REAL_BENCHMARK_OUTPUT ?= /results/respawn-benchmark-real.json
+REAL_BENCHMARK_RUNS ?= 3
+REAL_BENCHMARK_TIMEOUT_SECONDS ?= 300
 
-.PHONY: help env config up up-build down stop restart ps logs logs-respawn logs-ollama build pull preload models health ready metrics grafana benchmark benchmark-mock benchmark-up benchmark-clean
+.PHONY: help env config up up-build down stop restart ps logs logs-respawn logs-ollama build pull preload models health ready metrics grafana benchmark benchmark-real benchmark-mock benchmark-up benchmark-clean
 
 help:
 	@printf "Respawn Docker helpers\n\n"
@@ -22,6 +25,8 @@ help:
 	@printf "  make models          List Ollama models in the container\n"
 	@printf "  make metrics         Print Respawn metrics\n"
 	@printf "  make env             Create a local override env if missing\n\n"
+	@printf "Release gates:\n"
+	@printf "  make benchmark-real  Run full real Ollama benchmark with no tag filters\n\n"
 	@printf "Using env file: $(ENV_FILE)\n"
 
 env:
@@ -87,6 +92,34 @@ benchmark:
 	@mkdir -p benchmark-results
 	RESPAWN_BENCHMARK_UID=$$(id -u) RESPAWN_BENCHMARK_GID=$$(id -g) $(COMPOSE) $(BENCHMARK_FILES) up -d --build respawn
 	RESPAWN_BENCHMARK_UID=$$(id -u) RESPAWN_BENCHMARK_GID=$$(id -g) RESPAWN_BENCHMARK_GIT_SHA=$$(git -C ../.. rev-parse --short HEAD 2>/dev/null || true) $(COMPOSE) $(BENCHMARK_FILES) run --rm respawn-benchmark
+
+benchmark-real:
+	@mkdir -p benchmark-results
+	MODEL_BACKEND=ollama \
+	RESPAWN_BENCHMARK_UID=$$(id -u) \
+	RESPAWN_BENCHMARK_GID=$$(id -g) \
+	RESPAWN_BENCHMARK_INCLUDE_TAGS= \
+	RESPAWN_BENCHMARK_EXCLUDE_TAGS= \
+	RESPAWN_BENCHMARK_COMPARE_TO= \
+	RESPAWN_BENCHMARK_COVERAGE_GATE=true \
+	RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=true \
+	RESPAWN_BENCHMARK_RUNS=$(REAL_BENCHMARK_RUNS) \
+	RESPAWN_BENCHMARK_TIMEOUT_SECONDS=$(REAL_BENCHMARK_TIMEOUT_SECONDS) \
+	RESPAWN_BENCHMARK_OUTPUT=$(REAL_BENCHMARK_OUTPUT) \
+	$(COMPOSE) $(BENCHMARK_FILES) up -d --build respawn
+	MODEL_BACKEND=ollama \
+	RESPAWN_BENCHMARK_UID=$$(id -u) \
+	RESPAWN_BENCHMARK_GID=$$(id -g) \
+	RESPAWN_BENCHMARK_GIT_SHA=$$(git -C ../.. rev-parse --short HEAD 2>/dev/null || true) \
+	RESPAWN_BENCHMARK_INCLUDE_TAGS= \
+	RESPAWN_BENCHMARK_EXCLUDE_TAGS= \
+	RESPAWN_BENCHMARK_COMPARE_TO= \
+	RESPAWN_BENCHMARK_COVERAGE_GATE=true \
+	RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS=true \
+	RESPAWN_BENCHMARK_RUNS=$(REAL_BENCHMARK_RUNS) \
+	RESPAWN_BENCHMARK_TIMEOUT_SECONDS=$(REAL_BENCHMARK_TIMEOUT_SECONDS) \
+	RESPAWN_BENCHMARK_OUTPUT=$(REAL_BENCHMARK_OUTPUT) \
+	$(COMPOSE) $(BENCHMARK_FILES) run --rm respawn-benchmark
 
 benchmark-mock:
 	@mkdir -p benchmark-results

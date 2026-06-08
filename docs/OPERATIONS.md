@@ -124,12 +124,25 @@ The report adds a `comparison` section with passed/failed/skipped deltas, new
 and removed cases, latency p50 deltas, slowest regressions, and largest
 improvements.
 
+For a full real Ollama release gate, use the dedicated target:
+
+```bash
+cd infra/docker
+make benchmark-real
+```
+
+`benchmark-real` forces `MODEL_BACKEND=ollama`, clears benchmark tag filters,
+keeps `RESPAWN_BENCHMARK_COVERAGE_GATE=true`, expects Ollama metrics, and writes
+`benchmark-results/respawn-benchmark-real.json`. Override the latency sample
+count with `REAL_BENCHMARK_RUNS=<n>` when needed.
+
 ## Release Certification Checklist
 
 Before tagging a Responses-compatible release:
 
 - Run the fast gateway test suite.
-- Run `make benchmark` against the real Ollama stack with coverage gate enabled.
+- Run `make benchmark-real` against the real Ollama stack with coverage gate
+  enabled.
 - Confirm `compatibility.coverage` reports zero missing supported features.
 - Run or inspect `metrics.full_surface`, `ops.concurrent_streaming`,
   `ops.concurrent_background`, `ops.ollama_unavailable`, and

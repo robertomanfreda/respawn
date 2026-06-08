@@ -373,7 +373,19 @@ The benchmark suite calls Respawn over HTTP and validates feature behavior,
 latency, compatibility coverage, SDK contract paths, metrics, and operations
 drills.
 
-Run the real Ollama-backed gate:
+Run the full real Ollama-backed release gate:
+
+```bash
+cd infra/docker
+make benchmark-real
+```
+
+This target forces `MODEL_BACKEND=ollama`, clears tag include/exclude filters,
+keeps the compatibility coverage gate enabled, expects Ollama metrics, and
+writes `benchmark-results/respawn-benchmark-real.json`.
+
+Run the configurable real benchmark target when you intentionally want to pass
+tag filters or custom comparison settings:
 
 ```bash
 cd infra/docker
@@ -395,6 +407,7 @@ RESPAWN_BENCHMARK_INCLUDE_TAGS=streaming make benchmark
 RESPAWN_BENCHMARK_INCLUDE_TAGS=observability make benchmark
 RESPAWN_BENCHMARK_EXCLUDE_TAGS=reasoning make benchmark
 RESPAWN_BENCHMARK_COMPARE_TO=/results/respawn-benchmark-previous.json make benchmark
+make benchmark-real REAL_BENCHMARK_RUNS=1
 ```
 
 Reports are written to `infra/docker/benchmark-results/`.
