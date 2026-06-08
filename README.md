@@ -27,6 +27,37 @@ jobs belong to the model backend underneath it.
   Grafana dashboard.
 - Real-backend benchmark suite with compatibility coverage gates.
 
+## Why Respawn?
+
+Ollama, vLLM, and similar servers are inference backends: they are good at
+loading models and generating tokens. Respawn is the compatibility and
+operations layer in front of that backend. Use it when your application expects
+OpenAI-style Responses behavior, state, SDK ergonomics, and production signals
+instead of a thin model generation endpoint.
+
+Direct Ollama is often enough for simple prompts. Respawn becomes useful when
+you need the backend to behave like a local OpenAI-shaped platform:
+
+| Need | Direct backend API | With Respawn |
+| --- | --- | --- |
+| OpenAI Responses endpoint | Ollama exposes an OpenAI-like Chat Completions API, not full `/v1/responses`. | `POST /v1/responses` with blocking, streaming, background, retrieve, delete, cancel, and input-item flows. |
+| Conversation continuity | The client usually has to resend or rebuild history. | `previous_response_id` chains are stored and reconstructed server-side. |
+| Stored response objects | Generation results are transient unless the client stores them. | Responses, input items, artifacts, and metadata can be persisted locally. |
+| OpenAI SDK behavior | Compatibility depends on the specific backend surface. | The official OpenAI Python SDK can target Respawn's `/v1` base URL. |
+| Streaming event shape | Backend-native streams vary by provider. | Streams are normalized into Responses lifecycle events. |
+| Background jobs | Usually not provided as OpenAI-shaped response lifecycle state. | `background=true`, polling, terminal retrieval, cancellation, and metrics are implemented locally. |
+| File and image inputs | Backend-specific handling and error behavior. | Local Files API subset, file extraction, artifact records, and vision capability checks. |
+| Function tool protocol | Backend support varies and may be chat-shaped. | Responses function-call items are validated, stored, replayed, and streamed as protocol data. |
+| Context planning | Mostly a client concern. | Local token estimates, truncation, compaction, and prompt-cache accounting. |
+| Errors and request IDs | Backend-specific error payloads. | OpenAI-shaped errors, stable request IDs, idempotency handling, and tenant scoping. |
+| Operations | Backend metrics only, often model-runtime focused. | Prometheus metrics, structured logs, readiness checks, backend/model labels, and Grafana dashboards. |
+| Release confidence | Manual probing. | Real-backend benchmark suite plus compatibility coverage gates. |
+
+Respawn does not make the model itself smarter or faster. It makes local
+inference easier to integrate, observe, test, and swap behind an API contract.
+The same gateway model can apply to future backends such as vLLM once an
+adapter is implemented.
+
 ## Current Scope
 
 Respawn currently targets one gateway instance connected to one configured model
