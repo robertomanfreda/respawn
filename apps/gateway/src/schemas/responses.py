@@ -36,6 +36,7 @@ class ResponseRequest(BaseModel):
     service_tier: str | None = None
     top_logprobs: int | None = Field(default=None, ge=0, le=20)
     safety_identifier: str | None = None
+    client_metadata: dict[str, Any] | None = None
     user: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

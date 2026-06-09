@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 
-MANIFEST_VERSION = "phase-15"
+MANIFEST_VERSION = "phase-16"
 MANIFEST_SOURCE = "docs/COMPATIBILITY.md"
 
 
@@ -302,6 +302,15 @@ FEATURES: list[dict[str, Any]] = [
         "tags": ["core"],
         "benchmark_case": "responses.shape.metadata_retrieve",
         "notes": "Accepted and round-tripped for SDK shape compatibility.",
+    },
+    {
+        "id": "request.client_metadata",
+        "category": "request_field",
+        "surface": "client_metadata",
+        "status": "supported_local",
+        "tags": ["sdk", "state"],
+        "benchmark_case": "responses.shape.metadata_retrieve",
+        "notes": "Accepted as opaque client telemetry metadata for Codex/SDK compatibility; it is stored with the request snapshot but is not forwarded to the model backend or exposed on response objects.",
     },
     {
         "id": "request.prompt_templates",

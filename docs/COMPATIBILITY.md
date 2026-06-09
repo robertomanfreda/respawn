@@ -6,10 +6,10 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 
 ## Summary
 
-- Manifest version: `phase-15`
+- Manifest version: `phase-16`
 - Manifest source: `docs/COMPATIBILITY.md`
-- Total tracked features: `114`
-- Supported or conditionally supported: `107`
+- Total tracked features: `115`
+- Supported or conditionally supported: `108`
 - Explicitly unsupported: `7`
 
 | Status | Count | Meaning |
@@ -17,7 +17,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `supported` | 50 | OpenAI-shaped behavior is implemented and benchmarked. |
 | `supported_backend_capability` | 4 | The request/response shape is supported, but success depends on configured backend/model capability. |
 | `supported_estimated` | 1 | Respawn returns a deterministic local estimate rather than hosted-provider authoritative data. |
-| `supported_local` | 51 | Respawn implements the behavior with local single-instance semantics. |
+| `supported_local` | 52 | Respawn implements the behavior with local single-instance semantics. |
 | `supported_text_only` | 1 | Implemented for the current text-only scope. |
 | `unsupported` | 7 | Rejected explicitly or deliberately outside Respawn scope. |
 
@@ -71,6 +71,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `request.metadata` | metadata | `supported` | `responses.shape.metadata_retrieve` |  |
 | `request.service_tier` | service_tier | `supported_local` | `responses.shape.metadata_retrieve` | Accepted and round-tripped as local metadata; it does not change local scheduling. |
 | `request.safety_identifier` | safety_identifier | `supported_local` | `responses.shape.metadata_retrieve` | Accepted and round-tripped for SDK shape compatibility. |
+| `request.client_metadata` | client_metadata | `supported_local` | `responses.shape.metadata_retrieve` | Accepted as opaque client telemetry metadata for Codex/SDK compatibility; stored with the request snapshot but not forwarded to the backend or exposed on response objects. |
 | `request.prompt_templates` | prompt={id, version, variables} | `supported_local` | `responses.prompt.template_render` | Respawn supports local API-managed prompt templates under /v1/responses/prompts. Templates render instructions/input with {{variable}} placeholders before local context planning and backend calls. |
 | `request.prompt_template_errors` | missing prompt templates and missing prompt variables | `supported_local` | `responses.prompt.template_missing` | Missing templates and missing variables return deterministic OpenAI-shaped errors. |
 | `request.idempotency_key` | Idempotency-Key request header for POST requests | `supported_local` | `sdk.errors` | Single-instance in-memory replay cache. Reusing a key with a different body returns 409 idempotency_conflict. |

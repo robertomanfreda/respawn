@@ -142,7 +142,7 @@ def benchmark_cases() -> list[BenchmarkCase]:
         BenchmarkCase("models", {"core"}, {"endpoints.models.list"}, lambda state: case_models()),
         BenchmarkCase("responses.blocking", {"core", "state"}, {"endpoints.responses.create", "request.model_and_text_input", "request.sampling_and_limits", "request.truncation_disabled", "response.core_shape"}, case_responses_blocking),
         BenchmarkCase("responses.shape.blocking_text", {"core", "state"}, {"request.text_format", "response.request_settings", "response.output_content_shape"}, lambda state: case_responses_shape_blocking_text()),
-        BenchmarkCase("responses.shape.metadata_retrieve", {"core", "state"}, {"request.metadata", "request.service_tier", "request.safety_identifier"}, lambda state: case_responses_shape_metadata_retrieve()),
+        BenchmarkCase("responses.shape.metadata_retrieve", {"core", "state"}, {"request.metadata", "request.service_tier", "request.safety_identifier", "request.client_metadata"}, lambda state: case_responses_shape_metadata_retrieve()),
         BenchmarkCase("responses.shape.max_output_incomplete", {"core"}, {"response.incomplete_status"}, lambda state: case_responses_shape_max_output_incomplete()),
         BenchmarkCase("responses.shape.unsupported_user_field", {"core", "state"}, {"request.unsupported_fields"}, lambda state: case_responses_shape_unsupported_user_field()),
         BenchmarkCase("responses.tools.function_call", {"tools"}, {"request.function_tools"}, case_responses_tools_function_call),
@@ -461,6 +461,7 @@ def case_responses_shape_metadata_retrieve() -> str:
         "max_output_tokens": completion_output_tokens(),
         "service_tier": "default",
         "safety_identifier": "respawn-benchmark",
+        "client_metadata": {"x-codex-installation-id": "respawn-benchmark"},
         "text": {"format": {"type": "text"}},
         "store": True,
     }
@@ -471,6 +472,7 @@ def case_responses_shape_metadata_retrieve() -> str:
         expect(body.get("metadata") == payload["metadata"], f"metadata did not round-trip: {body.get('metadata')}")
         expect(body.get("service_tier") == "default", f"service_tier did not round-trip: {body.get('service_tier')}")
         expect(body.get("safety_identifier") == "respawn-benchmark", f"safety_identifier did not round-trip: {body.get('safety_identifier')}")
+        expect("client_metadata" not in body, f"client_metadata should not be exposed on response objects: {body}")
         expect(body.get("text") == {"format": {"type": "text"}}, f"text did not round-trip: {body.get('text')}")
         expect(body.get("temperature") == 0, f"temperature did not round-trip: {body.get('temperature')}")
         expect(body.get("top_p") == 1, f"top_p did not round-trip: {body.get('top_p')}")

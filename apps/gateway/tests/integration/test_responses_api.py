@@ -160,6 +160,23 @@ def test_response_request_settings_round_trip_through_retrieve(client):
         assert body["store"] is True
 
 
+def test_client_metadata_is_accepted_without_response_exposure(client):
+    payload = {
+        "model": "gpt-oss-120b",
+        "input": "client metadata compatibility",
+        "client_metadata": {"x-codex-installation-id": "install-local-test"},
+        "store": True,
+    }
+
+    created = client.post("/v1/responses", json=payload)
+
+    assert created.status_code == 200
+    assert "client_metadata" not in created.json()
+    retrieved = client.get(f"/v1/responses/{created.json()['id']}")
+    assert retrieved.status_code == 200
+    assert "client_metadata" not in retrieved.json()
+
+
 def test_max_output_token_exhaustion_marks_response_incomplete(client):
     created = client.post("/v1/responses", json={"input": "please produce more than one token", "max_output_tokens": 1}).json()
 
@@ -1157,6 +1174,27 @@ def test_builtin_tools_are_explicitly_unsupported(client):
     assert response.json()["error"]["code"] == "unsupported_parameter"
     assert response.json()["error"]["param"] == "tools.0.type"
 
+    codex_like_response = client.post(
+        "/v1/responses",
+        json={
+            "input": "search",
+            "client_metadata": {"x-codex-installation-id": "install-local-test"},
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "Run a command.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                {"type": "web_search"},
+            ],
+        },
+    )
+
+    assert codex_like_response.status_code == 400
+    assert codex_like_response.json()["error"]["code"] == "unsupported_parameter"
+    assert codex_like_response.json()["error"]["param"] == "tools.1.type"
+
 
 def test_invalid_prompt_cache_retention_is_explicit(client):
     response = client.post("/v1/responses", json={"input": "hello", "prompt_cache_retention": "forever"})
@@ -1245,7 +1283,25 @@ def test_request_logs_include_operational_fields(client, monkeypatch):
     assert extra["backend"] == "mock"
     assert extra["status"] == 200
     assert extra["error_code"] is None
+    assert extra["error_param"] is None
     assert extra["latency_ms"] >= 0
+
+
+def test_request_logs_include_error_param(client, monkeypatch):
+    log_records = []
+
+    def capture_info(message, **kwargs):
+        log_records.append((message, kwargs.get("extra") or {}))
+
+    monkeypatch.setattr("src.main.logger.info", capture_info)
+
+    response = client.post("/v1/responses", json={"input": "bad", "client_metadata": 1})
+
+    assert response.status_code == 422
+    records = [record for record in log_records if record[0] == "HTTP request completed"]
+    extra = records[-1][1]
+    assert extra["error_code"] == "validation_error"
+    assert extra["error_param"] == "client_metadata"
 
 
 def test_reasoning_metrics_include_effort_tokens_and_heavy_counter(tmp_path, monkeypatch):

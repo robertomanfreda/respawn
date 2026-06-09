@@ -45,6 +45,17 @@ Candidate tasks:
 - Add a small reproducible probe under the benchmark or tooling tree.
 - Document a supported local Codex configuration once the behavior is proven.
 
+Observed starting point:
+
+- Codex CLI `0.137.0-alpha.4` sends `client_metadata`, `prompt_cache_key`,
+  `store=false`, `stream=true`, `parallel_tool_calls=false`, function tools for
+  local client actions, plus native `web_search` and `image_generation` tools.
+- Respawn accepts `client_metadata` as opaque request metadata as of
+  compatibility manifest `phase-16`.
+- The next Codex smoke-test blocker is native built-in tool handling:
+  `web_search` and `image_generation` remain explicitly unsupported until a
+  local/client/hosted execution boundary is defined.
+
 Acceptance criteria:
 
 - A Codex smoke test can complete through Respawn with a local model.

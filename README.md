@@ -73,7 +73,7 @@ Current manifest summary:
 
 | Tracked features | Supported or conditional | Explicitly unsupported |
 | ---: | ---: | ---: |
-| 114 | 107 | 7 |
+| 115 | 108 | 7 |
 
 Respawn deliberately does not implement the OpenAI Conversations API, hosted
 tool execution, audio/realtime APIs, distributed prompt caches, dynamic backend

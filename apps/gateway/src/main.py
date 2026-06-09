@@ -111,6 +111,7 @@ def create_app() -> FastAPI:
             status = str(response.status_code)
             feature = _feature_family(path)
             error_code = _error_code(parsed_body, response.status_code)
+            error_param = _error_param(parsed_body) if response.status_code >= 400 else None
             response_id = _response_id(parsed_body)
             REQUEST_LATENCY.observe(elapsed)
             REQUESTS.labels(method=request.method, path=path, status=status).inc()
@@ -134,6 +135,7 @@ def create_app() -> FastAPI:
                     "latency_ms": round(elapsed * 1000, 3),
                     "status": response.status_code,
                     "error_code": error_code if response.status_code >= 400 else None,
+                    "error_param": error_param,
                 },
             )
             return response
@@ -243,6 +245,13 @@ def _error_code(parsed_body: dict | None, status_code: int) -> str:
     if isinstance(error, dict) and error.get("type"):
         return str(error["type"])
     return str(status_code)
+
+
+def _error_param(parsed_body: dict | None) -> str | None:
+    error = parsed_body.get("error") if parsed_body else None
+    if isinstance(error, dict) and error.get("param") is not None:
+        return str(error["param"])
+    return None
 
 
 def _failure_component(error_code: str, feature: str, request) -> str:

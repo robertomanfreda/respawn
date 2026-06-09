@@ -43,6 +43,7 @@ HTTP completion logs are structured JSON. Each request log includes:
 - `latency_ms`
 - `status`
 - `error_code` for error responses
+- `error_param` for OpenAI-shaped error responses when available
 
 Logs intentionally avoid API keys and full request or response payloads.
 
