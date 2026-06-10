@@ -1,4 +1,13 @@
 services:
+  respawn:
+    environment:
+      AUTH_DISABLED: "false"
+      LOCAL_OPENAI_API_KEYS: ${RESPAWN_BENCHMARK_API_KEYS:-local-dev-key:tenant-local,respawn-other-key:tenant-other}
+      WEB_SEARCH_ENABLED: "true"
+      WEB_SEARCH_BACKEND: mock
+      IMAGE_GENERATION_ENABLED: "true"
+      IMAGE_GENERATION_BACKEND: mock
+
   respawn-benchmark:
     image: python:3.12-slim
     profiles:
@@ -8,19 +17,50 @@ services:
     environment:
       RESPAWN_BASE_URL: ${RESPAWN_BENCHMARK_BASE_URL:-http://respawn:8080}
       RESPAWN_API_KEY: ${RESPAWN_BENCHMARK_API_KEY:-local-dev-key}
+      RESPAWN_SECONDARY_API_KEY: ${RESPAWN_BENCHMARK_SECONDARY_API_KEY:-respawn-other-key}
       RESPAWN_BENCHMARK_MODEL: ${RESPAWN_BENCHMARK_MODEL:-gpt-oss:120b}
+      RESPAWN_BENCHMARK_TEXT_MODEL: ${RESPAWN_BENCHMARK_TEXT_MODEL:-gpt-oss:120b}
+      RESPAWN_BENCHMARK_VISION_MODEL: ${RESPAWN_BENCHMARK_VISION_MODEL:-moondream:latest}
+      RESPAWN_BENCHMARK_ASSET_BASE_URL: ${RESPAWN_BENCHMARK_ASSET_BASE_URL:-http://benchmark-assets:8000}
+      RESPAWN_BENCHMARK_MODEL_BACKEND: ${MODEL_BACKEND:-ollama}
+      RESPAWN_BENCHMARK_OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
+      RESPAWN_BENCHMARK_DATABASE_DRIVER: postgresql+asyncpg
+      RESPAWN_BENCHMARK_GIT_SHA: ${RESPAWN_BENCHMARK_GIT_SHA:-}
       RESPAWN_BENCHMARK_RUNS: ${RESPAWN_BENCHMARK_RUNS:-3}
       RESPAWN_BENCHMARK_TIMEOUT_SECONDS: ${RESPAWN_BENCHMARK_TIMEOUT_SECONDS:-180}
       RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS: ${RESPAWN_BENCHMARK_MAX_OUTPUT_TOKENS:-64}
       RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS: ${RESPAWN_BENCHMARK_EXPECT_OLLAMA_METRICS:-true}
+      RESPAWN_BENCHMARK_INCLUDE_TAGS: ${RESPAWN_BENCHMARK_INCLUDE_TAGS:-}
+      RESPAWN_BENCHMARK_EXCLUDE_TAGS: ${RESPAWN_BENCHMARK_EXCLUDE_TAGS:-}
+      RESPAWN_BENCHMARK_COVERAGE_GATE: ${RESPAWN_BENCHMARK_COVERAGE_GATE:-true}
       RESPAWN_BENCHMARK_OUTPUT: ${RESPAWN_BENCHMARK_OUTPUT:-/results/respawn-benchmark.json}
+      RESPAWN_BENCHMARK_COMPARE_TO: ${RESPAWN_BENCHMARK_COMPARE_TO:-}
     command:
-      - python
-      - /benchmark/respawn_benchmark.py
+      - sh
+      - -c
+      - python -m pip install --no-cache-dir --target /tmp/respawn-benchmark-deps 'openai>=1.82' && PYTHONPATH=/tmp/respawn-benchmark-deps python /benchmark/respawn_benchmark.py
     volumes:
       - ./benchmark:/benchmark:ro
       - ./benchmark-results:/results
     depends_on:
       respawn:
         condition: service_started
+      benchmark-assets:
+        condition: service_started
+    restart: "no"
+
+  benchmark-assets:
+    image: python:3.12-slim
+    profiles:
+      - benchmark
+    working_dir: /assets
+    command:
+      - python
+      - -m
+      - http.server
+      - "8000"
+      - --bind
+      - 0.0.0.0
+    volumes:
+      - ./benchmark/assets:/assets:ro
     restart: "no"

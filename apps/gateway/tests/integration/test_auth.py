@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from src.adapters.mock_control import mock_metadata
 from src.config import get_settings
 from src.main import create_app
 
@@ -18,6 +19,15 @@ def test_auth_enabled_scopes_responses_by_tenant(tmp_path, monkeypatch):
         created = client.post("/v1/responses", headers={"Authorization": "Bearer key-a"}, json={"input": "tenant scoped"}).json()
         assert client.get(f"/v1/responses/{created['id']}", headers={"Authorization": "Bearer key-a"}).status_code == 200
         assert client.get(f"/v1/responses/{created['id']}", headers={"Authorization": "Bearer key-b"}).status_code == 404
+        assert client.get(f"/v1/responses/{created['id']}/input_items", headers={"Authorization": "Bearer key-a"}).status_code == 200
+        assert client.get(f"/v1/responses/{created['id']}/input_items", headers={"Authorization": "Bearer key-b"}).status_code == 404
+        background = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-a"},
+            json={"input": "background tenant scoped", "background": True, "store": True, "metadata": mock_metadata(delay_seconds=0.15)},
+        ).json()
+        assert client.post(f"/v1/responses/{background['id']}/cancel", headers={"Authorization": "Bearer key-b"}).status_code == 404
+        assert client.post(f"/v1/responses/{background['id']}/cancel", headers={"Authorization": "Bearer key-a"}).status_code == 200
 
         cross_tenant_child = client.post(
             "/v1/responses",

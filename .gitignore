@@ -6,6 +6,7 @@ __pycache__/
 .env
 infra/docker/env
 infra/docker/benchmark-results/
+apps/gateway/data/
 dist/
 build/
 *.egg-info/

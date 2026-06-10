@@ -25,6 +25,33 @@ async def test_ollama_list_models_uses_models_endpoint():
         "object": "list",
         "data": [{"id": "gpt-oss:120b", "object": "model", "created": 123, "owned_by": "ollama"}],
     }
+    metrics = generate_latest().decode()
+    assert 'gateway_backend_model_info{backend="ollama",model="gpt-oss:120b"} 1.0' in metrics
+
+
+@pytest.mark.asyncio
+async def test_ollama_list_models_preserves_backend_model_metadata():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "gpt-oss:120b",
+                        "object": "model",
+                        "created": 123,
+                        "owned_by": "ollama",
+                        "context_window": 131072,
+                    }
+                ],
+            },
+        )
+
+    adapter = OllamaBackend("http://ollama.test/v1", 10, transport=httpx.MockTransport(handler))
+    result = await adapter.list_models()
+
+    assert result.data[0].model_dump()["context_window"] == 131072
 
 
 @pytest.mark.asyncio
@@ -34,6 +61,7 @@ async def test_ollama_non_streaming_payload_and_usage_mapping():
         payload = json.loads(request.content)
         assert payload["model"] == "gpt-oss:120b"
         assert payload["stream"] is False
+        assert payload["think"] is False
         assert payload["options"]["num_predict"] == 8
         return httpx.Response(
             200,
@@ -73,6 +101,20 @@ async def test_ollama_reasoning_maps_to_think_and_usage_details():
     assert result.content == "ciao"
     assert result.reasoning == "check the prompt carefully"
     assert result.usage["output_tokens_details"]["reasoning_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_ollama_reasoning_xhigh_maps_to_high_think_level():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["think"] == "high"
+        return httpx.Response(200, json={"message": {"role": "assistant", "thinking": "deep check", "content": "ok"}, "prompt_eval_count": 1, "eval_count": 2})
+
+    adapter = OllamaBackend("http://ollama.test/v1", 10, transport=httpx.MockTransport(handler))
+    result = await adapter.create_chat_completion({"model": "gpt-oss:120b", "messages": [], "reasoning": {"effort": "xhigh"}})
+
+    assert result.content == "ok"
+    assert result.reasoning == "deep check"
 
 
 @pytest.mark.asyncio
@@ -149,6 +191,40 @@ async def test_ollama_tool_call_messages_are_mapped_to_native_arguments():
 
 
 @pytest.mark.asyncio
+async def test_ollama_multimodal_message_maps_images_and_file_text():
+    image_base64 = "iVBORw0KGgo="
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        message = payload["messages"][0]
+        assert message["images"] == [image_base64]
+        assert "[Image input]" not in message["content"]
+        assert "describe" in message["content"]
+        assert "[File: facts.txt]" in message["content"]
+        assert "marker word is cobalt" in message["content"]
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": "ok"}, "prompt_eval_count": 3, "eval_count": 1})
+
+    adapter = OllamaBackend("http://ollama.test/v1", 10, transport=httpx.MockTransport(handler))
+    result = await adapter.create_chat_completion(
+        {
+            "model": "moondream:latest",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_base64": image_base64, "mime_type": "image/png"},
+                        {"type": "input_file", "filename": "facts.txt", "text": "marker word is cobalt"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert result.content == "ok"
+
+
+@pytest.mark.asyncio
 async def test_ollama_streaming_maps_sse_chunks_and_usage():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/chat"
@@ -195,6 +271,9 @@ async def test_ollama_streaming_maps_jsonl_chunks_and_native_usage():
         {"type": "done", "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}},
     ]
     metrics = generate_latest().decode()
+    assert 'gateway_backend_eval_tokens_total{backend="ollama",model="gpt-oss:120b",operation="chat_completion_stream",phase="prefill"}' in metrics
+    assert 'gateway_backend_eval_duration_seconds_total{backend="ollama",model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"}' in metrics
+    assert 'gateway_backend_eval_tokens_per_second{backend="ollama",model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"} 10.0' in metrics
     assert 'gateway_ollama_eval_tokens_total{model="gpt-oss:120b",operation="chat_completion_stream",phase="prefill"}' in metrics
     assert 'gateway_ollama_eval_duration_seconds_total{model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"}' in metrics
     assert 'gateway_ollama_eval_tokens_per_second{model="gpt-oss:120b",operation="chat_completion_stream",phase="decode"} 10.0' in metrics
