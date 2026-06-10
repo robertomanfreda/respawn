@@ -19,6 +19,23 @@
   "graphTooltip": 1,
   "panels": [
     {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "panels": [],
+      "title": "Overview",
+      "type": "row"
+    },
+    {
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
@@ -27,7 +44,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "id": 1,
       "options": {
@@ -63,7 +80,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 0
+        "y": 1
       },
       "id": 2,
       "options": {
@@ -99,7 +116,43 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 0
+        "y": 1
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "min(gateway_readiness_check) by (check)",
+          "legendFormat": "{{check}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Readiness checks",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
       },
       "id": 3,
       "options": {
@@ -118,7 +171,7 @@
       },
       "targets": [
         {
-          "expr": "sum(gateway_inflight_responses)",
+          "expr": "sum(gateway_inflight_responses{model=~\"$model\"})",
           "legendFormat": "in flight",
           "refId": "A"
         }
@@ -134,8 +187,44 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 12,
-        "y": 0
+        "x": 16,
+        "y": 1
+      },
+      "id": 18,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "sum(gateway_streaming_responses_running{model=~\"$model\"} and on(model) gateway_backend_model_info{backend=~\"$llm_backend\",model=~\"$model\"})",
+          "legendFormat": "running",
+          "refId": "A"
+        }
+      ],
+      "title": "Streaming responses running",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
       },
       "id": 4,
       "options": {
@@ -154,7 +243,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_model_token_usage_total{kind=\"total\"}[$__rate_interval]))",
+          "expr": "sum(rate(gateway_model_token_usage_total{model=~\"$model\",kind=\"total\"}[$__rate_interval]))",
           "legendFormat": "tokens/s",
           "refId": "A"
         }
@@ -163,76 +252,21 @@
       "type": "stat"
     },
     {
+      "collapsed": false,
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
       },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
       },
-      "id": 13,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "avg(gateway_ollama_eval_tokens_per_second{phase=\"prefill\"}) by (model)",
-          "legendFormat": "{{model}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Ollama prefill t/s",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "victoriametrics"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "id": 14,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "avg(gateway_ollama_eval_tokens_per_second{phase=\"decode\"}) by (model)",
-          "legendFormat": "{{model}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Ollama decode t/s",
-      "type": "stat"
+      "id": 101,
+      "panels": [],
+      "title": "Model API",
+      "type": "row"
     },
     {
       "datasource": {
@@ -243,7 +277,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 4
+        "y": 6
       },
       "id": 5,
       "options": {
@@ -259,12 +293,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_responses_total[$__rate_interval])) by (model, mode, status)",
+          "expr": "sum(rate(gateway_responses_total{model=~\"$model\"}[$__rate_interval])) by (model, mode, status)",
           "legendFormat": "responses / {{model}} / {{mode}} / {{status}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(gateway_chat_completions_total[$__rate_interval])) by (model, mode, status)",
+          "expr": "sum(rate(gateway_chat_completions_total{model=~\"$model\"}[$__rate_interval])) by (model, mode, status)",
           "legendFormat": "chat / {{model}} / {{mode}} / {{status}}",
           "refId": "B"
         }
@@ -281,7 +315,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 4
+        "y": 6
       },
       "id": 6,
       "options": {
@@ -297,17 +331,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(gateway_response_latency_seconds_bucket[$__rate_interval])) by (le, model, mode))",
+          "expr": "histogram_quantile(0.95, sum(rate(gateway_response_latency_seconds_bucket{model=~\"$model\"}[$__rate_interval])) by (le, model, mode))",
           "legendFormat": "p95 {{model}} / {{mode}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum(rate(gateway_response_latency_seconds_bucket[$__rate_interval])) by (le, model, mode))",
+          "expr": "histogram_quantile(0.50, sum(rate(gateway_response_latency_seconds_bucket{model=~\"$model\"}[$__rate_interval])) by (le, model, mode))",
           "legendFormat": "p50 {{model}} / {{mode}}",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(gateway_chat_completion_latency_seconds_bucket[$__rate_interval])) by (le, model, mode))",
+          "expr": "histogram_quantile(0.95, sum(rate(gateway_chat_completion_latency_seconds_bucket{model=~\"$model\"}[$__rate_interval])) by (le, model, mode))",
           "legendFormat": "chat p95 {{model}} / {{mode}}",
           "refId": "C"
         }
@@ -324,7 +358,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 14
       },
       "id": 7,
       "options": {
@@ -340,7 +374,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_model_token_usage_total{kind!=\"total\"}[$__rate_interval])) by (api, model, kind)",
+          "expr": "sum(rate(gateway_model_token_usage_total{model=~\"$model\",kind!=\"total\"}[$__rate_interval])) by (api, model, kind)",
           "legendFormat": "{{api}} / {{model}} / {{kind}}",
           "refId": "A"
         }
@@ -357,7 +391,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 14
       },
       "id": 8,
       "options": {
@@ -373,12 +407,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_model_token_usage_total{api=\"responses\",kind=\"output\"}[$__rate_interval])) by (model) / clamp_min(sum(rate(gateway_responses_total{status=\"completed\"}[$__rate_interval])) by (model), 0.001)",
+          "expr": "sum(rate(gateway_model_token_usage_total{api=\"responses\",model=~\"$model\",kind=\"output\"}[$__rate_interval])) by (model) / clamp_min(sum(rate(gateway_responses_total{model=~\"$model\",status=\"completed\"}[$__rate_interval])) by (model), 0.001)",
           "legendFormat": "responses / {{model}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(gateway_model_token_usage_total{api=\"chat\",kind=\"output\"}[$__rate_interval])) by (model) / clamp_min(sum(rate(gateway_chat_completions_total{status=\"completed\"}[$__rate_interval])) by (model), 0.001)",
+          "expr": "sum(rate(gateway_model_token_usage_total{api=\"chat\",model=~\"$model\",kind=\"output\"}[$__rate_interval])) by (model) / clamp_min(sum(rate(gateway_chat_completions_total{model=~\"$model\",status=\"completed\"}[$__rate_interval])) by (model), 0.001)",
           "legendFormat": "chat / {{model}}",
           "refId": "B"
         }
@@ -387,42 +421,93 @@
       "type": "timeseries"
     },
     {
+      "collapsed": false,
       "datasource": {
         "type": "prometheus",
         "uid": "victoriametrics"
       },
       "gridPos": {
-        "h": 8,
+        "h": 1,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 22
       },
-      "id": 15,
+      "id": 102,
+      "panels": [],
+      "title": "Backend LLM",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 23
+      },
+      "id": 13,
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "textMode": "value"
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_ollama_eval_tokens_total{phase=\"prefill\"}[$__rate_interval])) by (model, operation) / clamp_min(sum(rate(gateway_ollama_eval_duration_seconds_total{phase=\"prefill\"}[$__rate_interval])) by (model, operation), 0.001)",
-          "legendFormat": "prefill / {{model}} / {{operation}}",
+          "expr": "avg(gateway_backend_eval_tokens_per_second{backend=~\"$llm_backend\",model=~\"$model\",phase=\"prefill\"}) by (backend, model)",
+          "legendFormat": "{{backend}} / {{model}}",
           "refId": "A"
-        },
-        {
-          "expr": "sum(rate(gateway_ollama_eval_tokens_total{phase=\"decode\"}[$__rate_interval])) by (model, operation) / clamp_min(sum(rate(gateway_ollama_eval_duration_seconds_total{phase=\"decode\"}[$__rate_interval])) by (model, operation), 0.001)",
-          "legendFormat": "decode / {{model}} / {{operation}}",
-          "refId": "B"
         }
       ],
-      "title": "Ollama native prefill and decode t/s",
-      "type": "timeseries"
+      "title": "Backend prefill t/s",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 23
+      },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "avg(gateway_backend_eval_tokens_per_second{backend=~\"$llm_backend\",model=~\"$model\",phase=\"decode\"}) by (backend, model)",
+          "legendFormat": "{{backend}} / {{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Backend decode t/s",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -432,8 +517,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 28
+        "x": 12,
+        "y": 23
       },
       "id": 9,
       "options": {
@@ -449,12 +534,50 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_backend_requests_total[$__rate_interval])) by (backend, operation, status)",
-          "legendFormat": "{{backend}} / {{operation}} / {{status}}",
+          "expr": "sum(rate(gateway_backend_model_requests_total{backend=~\"$llm_backend\",model=~\"$model\"}[$__rate_interval])) by (backend, model, operation, status)",
+          "legendFormat": "{{backend}} / {{model}} / {{operation}} / {{status}}",
           "refId": "A"
         }
       ],
-      "title": "Backend calls",
+      "title": "Backend calls by model",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_backend_eval_tokens_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"prefill\"}[$__rate_interval])) by (backend, model, operation) / clamp_min(sum(rate(gateway_backend_eval_duration_seconds_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"prefill\"}[$__rate_interval])) by (backend, model, operation), 0.001)",
+          "legendFormat": "prefill / {{backend}} / {{model}} / {{operation}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(gateway_backend_eval_tokens_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"decode\"}[$__rate_interval])) by (backend, model, operation) / clamp_min(sum(rate(gateway_backend_eval_duration_seconds_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"decode\"}[$__rate_interval])) by (backend, model, operation), 0.001)",
+          "legendFormat": "decode / {{backend}} / {{model}} / {{operation}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Backend native prefill and decode t/s",
       "type": "timeseries"
     },
     {
@@ -466,7 +589,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 31
       },
       "id": 10,
       "options": {
@@ -482,17 +605,72 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(gateway_model_backend_latency_seconds_bucket[$__rate_interval])) by (le, backend, operation))",
+          "expr": "histogram_quantile(0.95, sum(rate(gateway_model_backend_latency_seconds_bucket{backend=~\"$llm_backend\"}[$__rate_interval])) by (le, backend, operation))",
           "legendFormat": "p95 {{backend}} / {{operation}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum(rate(gateway_model_backend_latency_seconds_bucket[$__rate_interval])) by (le, backend, operation))",
+          "expr": "histogram_quantile(0.50, sum(rate(gateway_model_backend_latency_seconds_bucket{backend=~\"$llm_backend\"}[$__rate_interval])) by (le, backend, operation))",
           "legendFormat": "p50 {{backend}} / {{operation}}",
           "refId": "B"
         }
       ],
       "title": "Backend latency",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "id": 103,
+      "panels": [],
+      "title": "Reliability and Traffic",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_operational_failures_total[$__rate_interval])) by (component, code)",
+          "legendFormat": "{{component}} / {{code}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(gateway_errors_total[$__rate_interval])) by (code)",
+          "legendFormat": "error {{code}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Operational failures",
       "type": "timeseries"
     },
     {
@@ -504,7 +682,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 48
       },
       "id": 11,
       "options": {
@@ -537,7 +715,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 48
       },
       "id": 12,
       "options": {
@@ -553,17 +731,340 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_tool_executions_total[$__rate_interval])) by (tool, status)",
-          "legendFormat": "{{tool}} / {{status}}",
+          "expr": "sum(rate(gateway_errors_total[$__rate_interval])) by (code)",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway errors",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_feature_requests_total[$__rate_interval])) by (feature, status)",
+          "legendFormat": "{{feature}} / {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Feature family traffic",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 17,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_endpoint_requests_total[$__rate_interval])) by (endpoint, status)",
+          "legendFormat": "{{endpoint}} / {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Endpoint traffic",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 104,
+      "panels": [],
+      "title": "Runtime",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_background_jobs_total[$__rate_interval])) by (status)",
+          "legendFormat": "{{status}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(gateway_errors_total[$__rate_interval])) by (code)",
-          "legendFormat": "error / {{code}}",
+          "expr": "sum(gateway_background_jobs_running)",
+          "legendFormat": "running",
           "refId": "B"
         }
       ],
-      "title": "Tools and errors",
+      "title": "Background jobs by status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(gateway_background_job_latency_seconds_bucket[$__rate_interval])) by (le, status))",
+          "legendFormat": "p95 {{status}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(gateway_background_job_latency_seconds_bucket[$__rate_interval])) by (le, status))",
+          "legendFormat": "p50 {{status}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Background job latency",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "id": 105,
+      "panels": [],
+      "title": "Feature Subsystems",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
+      "id": 22,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_context_compactions_total{model=~\"$model\"}[$__rate_interval])) by (model, mode)",
+          "legendFormat": "compactions {{model}}/{{mode}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(gateway_context_truncations_total{model=~\"$model\"}[$__rate_interval])) by (model, reason)",
+          "legendFormat": "truncations {{model}}/{{reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(gateway_context_overflows_total{model=~\"$model\"}[$__rate_interval])) by (model, truncation)",
+          "legendFormat": "overflows {{model}}/{{truncation}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Context management",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_storage_operations_total[$__rate_interval])) by (backend, operation, status)",
+          "legendFormat": "{{backend}} {{operation}} / {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Files and storage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg(gateway_prompt_cache_hit_ratio) by (retention)",
+          "legendFormat": "hit ratio {{retention}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(gateway_prompt_cache_tokens_total[$__rate_interval])) by (kind)",
+          "legendFormat": "tokens {{kind}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Prompt cache",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_response_include_expansions_total[$__rate_interval])) by (include, status)",
+          "legendFormat": "{{include}} / {{status}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(gateway_response_include_expansion_bytes_total[$__rate_interval])) by (include)",
+          "legendFormat": "bytes {{include}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Include expansions",
       "type": "timeseries"
     }
   ],
@@ -571,11 +1072,66 @@
   "schemaVersion": 39,
   "tags": [
     "respawn",
-    "ollama",
+    "model-gateway",
     "victoria-metrics"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "definition": "label_values(gateway_backend_model_info, backend)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "LLM backend",
+        "multi": true,
+        "name": "llm_backend",
+        "options": [],
+        "query": {
+          "query": "label_values(gateway_backend_model_info, backend)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "victoriametrics"
+        },
+        "definition": "label_values(gateway_backend_model_info{backend=~\"$llm_backend\"}, model)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Model",
+        "multi": true,
+        "name": "model",
+        "options": [],
+        "query": {
+          "query": "label_values(gateway_backend_model_info{backend=~\"$llm_backend\"}, model)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-30m",
@@ -585,6 +1141,6 @@
   "timezone": "browser",
   "title": "Respawn Model Gateway",
   "uid": "respawn-model-gateway",
-  "version": 2,
+  "version": 4,
   "weekStart": ""
 }

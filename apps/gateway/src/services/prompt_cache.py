@@ -37,7 +37,7 @@ class PromptCache:
         self.in_memory_ttl_seconds = max(1, in_memory_ttl_seconds)
         self.extended_ttl_seconds = max(1, extended_ttl_seconds)
         self.chunk_tokens = max(1, chunk_tokens)
-        self._entries: OrderedDict[str, float] = OrderedDict()
+        self._entries: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
     def inspect(self, payload: dict[str, Any], *, prompt_cache_key: str | None, retention: str | None) -> PromptCacheMatch:
         cache_key = prompt_cache_key or "default"
@@ -66,9 +66,20 @@ class PromptCache:
         self._prune(now)
         for length in self._prefix_lengths(len(tokens)):
             key = _prefix_key(cache_key, tokens, length)
-            self._entries[key] = expires_at
+            self._entries[key] = (expires_at, cache_key)
             self._entries.move_to_end(key)
         self._trim()
+
+    def clear(self, *, prompt_cache_key: str | None = None) -> int:
+        if prompt_cache_key is None:
+            deleted = len(self._entries)
+            self._entries.clear()
+            return deleted
+        cache_key = prompt_cache_key or "default"
+        deleted_keys = [key for key, (_, entry_cache_key) in self._entries.items() if entry_cache_key == cache_key]
+        for key in deleted_keys:
+            self._entries.pop(key, None)
+        return len(deleted_keys)
 
     def _cached_tokens(self, tokens: list[str], cache_key: str) -> int:
         if len(tokens) < self.min_tokens:
@@ -77,7 +88,8 @@ class PromptCache:
         self._prune(now)
         for length in reversed(self._prefix_lengths(len(tokens))):
             key = _prefix_key(cache_key, tokens, length)
-            expires_at = self._entries.get(key)
+            entry = self._entries.get(key)
+            expires_at = entry[0] if entry else None
             if expires_at and expires_at > now:
                 self._entries.move_to_end(key)
                 return length
@@ -92,7 +104,7 @@ class PromptCache:
         return lengths
 
     def _prune(self, now: float) -> None:
-        expired = [key for key, expires_at in self._entries.items() if expires_at <= now]
+        expired = [key for key, (expires_at, _) in self._entries.items() if expires_at <= now]
         for key in expired:
             self._entries.pop(key, None)
 
