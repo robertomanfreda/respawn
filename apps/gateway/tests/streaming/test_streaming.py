@@ -1,5 +1,7 @@
 import json
 
+from src.adapters.mock_control import mock_metadata
+
 
 def parse_sse_events(text):
     events = []
@@ -80,7 +82,7 @@ def test_streaming_failure_events(client):
         "POST",
         "/v1/responses",
         json={
-            "input": "stream repair failure",
+            "input": "stream structured output failure fixture",
             "stream": True,
             "text": {"format": {"type": "json_schema", "name": "impossible_schema", "schema": {"not": {}}}},
         },
@@ -141,7 +143,7 @@ def test_streaming_function_call_argument_events(client):
     done = next(event for event in events if event["event"] == "response.function_call_arguments.done")
     deltas = [event["data"]["delta"] for event in events if event["event"] == "response.function_call_arguments.delta"]
     assert added["data"]["item"]["arguments"] == ""
-    assert "".join(deltas) == done["data"]["arguments"] == '{"expression":"2+2"}'
+    assert "".join(deltas) == done["data"]["arguments"] == '{"expression":"string"}'
 
     terminal_response = events[-1]["data"]["response"]
     tool_item = terminal_response["output"][0]
@@ -150,6 +152,110 @@ def test_streaming_function_call_argument_events(client):
 
     retrieved = client.get(f"/v1/responses/{terminal_response['id']}").json()
     assert retrieved["output"] == terminal_response["output"]
+
+
+def test_streaming_web_search_output_item_events(web_search_client):
+    with web_search_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "input": "Search the web for latest stream search details",
+            "tools": [{"type": "web_search"}],
+            "metadata": mock_metadata(tool_call="web_search"),
+            "stream": True,
+            "store": True,
+        },
+    ) as response:
+        text = "".join(response.iter_text())
+
+    events = parse_sse_events(text)
+    event_types = [event["event"] for event in events]
+    assert event_types[-1] == "response.completed"
+    web_added = next(event for event in events if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "web_search_call")
+    web_done = next(event for event in events if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "web_search_call")
+    message_added = next(event for event in events if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "message")
+    assert events.index(web_added) < events.index(web_done) < events.index(message_added)
+    assert "sources" not in web_added["data"]["item"]["action"]
+
+    terminal_response = events[-1]["data"]["response"]
+    assert terminal_response["output"][0]["type"] == "web_search_call"
+    assert terminal_response["output"][1]["type"] == "message"
+    assert terminal_response["output"][1]["content"][0]["annotations"][0]["type"] == "url_citation"
+
+    retrieved = web_search_client.get(f"/v1/responses/{terminal_response['id']}").json()
+    assert retrieved["output"] == terminal_response["output"]
+
+
+def test_streaming_web_search_failure_events(web_search_client):
+    with web_search_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "input": "Streaming web search failure fixture",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "required",
+            "metadata": mock_metadata(web_search_error="timeout"),
+            "stream": True,
+        },
+    ) as response:
+        text = "".join(response.iter_text())
+
+    events = parse_sse_events(text)
+    event_types = [event["event"] for event in events]
+    assert event_types[-2:] == ["response.failed", "error"]
+    assert "response.output_item.added" not in event_types
+    assert events[-1]["data"]["error"]["code"] == "web_search_timeout"
+
+
+def test_streaming_image_generation_output_item_events(image_generation_client):
+    with image_generation_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "input": "Generate image of a tiny stream house",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "stream": True,
+            "store": True,
+        },
+    ) as response:
+        text = "".join(response.iter_text())
+
+    events = parse_sse_events(text)
+    event_types = [event["event"] for event in events]
+    assert event_types[-1] == "response.completed"
+    image_added = next(event for event in events if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "image_generation_call")
+    image_done = next(event for event in events if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "image_generation_call")
+    assert events.index(image_added) < events.index(image_done)
+    assert image_done["data"]["item"]["result"]
+
+    terminal_response = events[-1]["data"]["response"]
+    assert terminal_response["output"][0]["type"] == "image_generation_call"
+    assert terminal_response["output_text"] == ""
+
+    retrieved = image_generation_client.get(f"/v1/responses/{terminal_response['id']}").json()
+    assert retrieved["output"] == terminal_response["output"]
+
+
+def test_streaming_image_generation_failure_events(image_generation_client):
+    with image_generation_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "input": "Streaming image generation failure fixture",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
+            "metadata": mock_metadata(image_generation_error="timeout"),
+            "stream": True,
+        },
+    ) as response:
+        text = "".join(response.iter_text())
+
+    events = parse_sse_events(text)
+    event_types = [event["event"] for event in events]
+    assert event_types[-2:] == ["response.failed", "error"]
+    assert "response.output_item.added" not in event_types
+    assert events[-1]["data"]["error"]["code"] == "image_generation_timeout"
 
 
 def test_chat_completions_streaming(client):

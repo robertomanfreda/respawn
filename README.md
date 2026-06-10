@@ -17,7 +17,9 @@ jobs belong to the model backend underneath it.
 - Blocking, streaming, background, retrieve, delete, cancel, and input-item
   Responses flows.
 - Stateful `previous_response_id` reconstruction stored in Postgres or SQLite.
-- Responses function-tool protocol support without local tool execution.
+- Responses function-tool protocol support without local function execution.
+- Opt-in local Responses `web_search` through mock or SearXNG providers.
+- Opt-in local Responses `image_generation` through ComfyUI, with Automatic1111 kept as a legacy backend option.
 - Local Files API subset and file/image input normalization.
 - Local prompt templates, prompt-cache accounting, reasoning items, and context
   compaction/truncation.
@@ -47,7 +49,9 @@ you need the backend to behave like a local OpenAI-shaped platform:
 | Streaming event shape | Backend-native streams vary by provider. | Streams are normalized into Responses lifecycle events. |
 | Background jobs | Usually not provided as OpenAI-shaped response lifecycle state. | `background=true`, polling, terminal retrieval, cancellation, and metrics are implemented locally. |
 | File and image inputs | Backend-specific handling and error behavior. | Local Files API subset, file extraction, artifact records, and vision capability checks. |
-| Function tool protocol | Backend support varies and may be chat-shaped. | Responses function-call items are validated, stored, replayed, and streamed as protocol data. |
+| Function tool protocol | Backend support varies and may be chat-shaped. | Responses function-call items, including namespace-wrapped function tools, are validated, stored, replayed, and streamed as protocol data. |
+| Web search | Hosted providers execute search internally. | Optional local `web_search` runs through a configured provider, emits `web_search_call`, and adds URL citations. |
+| Image generation | Hosted providers execute image tools internally. | Optional local `image_generation` runs through a configured ComfyUI or Automatic1111-compatible provider and emits `image_generation_call` with a base64 PNG. |
 | Context planning | Mostly a client concern. | Local token estimates, truncation, compaction, and prompt-cache accounting. |
 | Errors and request IDs | Backend-specific error payloads. | OpenAI-shaped errors, stable request IDs, idempotency handling, and tenant scoping. |
 | Operations | Backend metrics only, often model-runtime focused. | Prometheus metrics, structured logs, readiness checks, backend/model labels, and Grafana dashboards. |
@@ -73,11 +77,12 @@ Current manifest summary:
 
 | Tracked features | Supported or conditional | Explicitly unsupported |
 | ---: | ---: | ---: |
-| 115 | 108 | 7 |
+| 128 | 121 | 7 |
 
-Respawn deliberately does not implement the OpenAI Conversations API, hosted
-tool execution, audio/realtime APIs, distributed prompt caches, dynamic backend
-routing, or multi-replica consistency.
+Respawn deliberately does not implement the OpenAI Conversations API, browser
+actions, hosted tool execution beyond opt-in local query-style `web_search` and
+SD1.5-backed text-to-image `image_generation`, audio/realtime APIs, distributed
+prompt caches, dynamic backend routing, or multi-replica consistency.
 
 ## Quick Start With Docker
 
@@ -316,9 +321,11 @@ Respawn supports the Responses function-tool protocol:
 3. Clients execute functions themselves.
 4. Clients submit `function_call_output` input items in a follow-up request.
 
-Respawn never executes tools. Hosted tools, shell, filesystem, git, workspace,
-browser, code interpreter, MCP hosting, and similar execution surfaces are
-explicitly out of scope.
+Respawn never executes function tools. Query-style `web_search` and
+text-to-image `image_generation` are available only when explicitly enabled and
+configured. Hosted tools, shell, filesystem, git, workspace, browser, code
+interpreter, MCP hosting, and similar execution surfaces are explicitly out of
+scope.
 
 ### Multimodal And Files
 
@@ -435,11 +442,15 @@ Important variables:
 | `LOCAL_OPENAI_API_KEYS` | Comma-separated `key:tenant` mappings. |
 | `STORE_DEFAULT` | Default Responses storage behavior. |
 | `MAX_CHAIN_DEPTH` | Maximum `previous_response_id` chain depth. |
+| `CONTEXT_WINDOW_DEFAULT_TOKENS` | Default model context window used for local truncation and model metadata. |
+| `MODEL_CONTEXT_WINDOWS` | Per-model context windows exposed by `/v1/models`, for example `gpt-oss:120b=131072`. |
 | `BACKEND_TIMEOUT_SECONDS` | Backend HTTP timeout. |
 | `BACKGROUND_JOB_TIMEOUT_SECONDS` | Background job timeout. |
 | `PROMPT_CACHE_*` | Local prompt-cache accounting settings. |
 | `FILE_STORAGE_BACKEND` | File blob storage backend. |
 | `FILE_STORAGE_PATH` | Filesystem storage path when enabled. |
+| `IMAGE_GENERATION_BACKEND` | Optional image backend: `comfyui`, `automatic1111`, or `mock`. |
+| `IMAGE_GENERATION_BASE_URL` | Image backend HTTP base URL. |
 | `GRAFANA_*` | Local Grafana settings. |
 | `RESPAWN_BENCHMARK_*` | Benchmark runner configuration. |
 

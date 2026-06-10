@@ -9,6 +9,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from src.adapters.mock_control import mock_metadata
 from src.config import get_settings
 from src.main import create_app
 from src.services.context_management import unseal_compaction_content
@@ -45,9 +46,16 @@ def _upload_text_file(client, *, filename: str = "facts.txt", text: str = "Respa
 def test_list_models(client):
     response = client.get("/v1/models")
     assert response.status_code == 200
-    assert response.json() == {
-        "object": "list",
-        "data": [{"id": "gpt-oss-120b", "object": "model", "created": 0, "owned_by": "mock"}],
+    body = response.json()
+    assert body["object"] == "list"
+    assert body["data"][0] == {
+        "id": "gpt-oss-120b",
+        "object": "model",
+        "created": 0,
+        "owned_by": "mock",
+        "context_window": 131072,
+        "max_context_window": 131072,
+        "effective_context_window_percent": 95,
     }
 
 
@@ -55,6 +63,7 @@ def test_list_models_root_alias(client):
     response = client.get("/models")
     assert response.status_code == 200
     assert response.json()["data"][0]["id"] == "gpt-oss-120b"
+    assert response.json()["data"][0]["context_window"] == 131072
 
 
 def test_basic_response_create_and_retrieve(client):
@@ -460,7 +469,7 @@ def test_context_management_compaction_emits_item_and_preserves_fact(client):
     body = second.json()
     assert body["output"][0]["type"] == "compaction"
     assert isinstance(body["output"][0]["encrypted_content"], str)
-    assert body["output_text"] == "Mock response: amethyst"
+    assert "amethyst" in body["output_text"]
 
 
 def test_compact_endpoint_returns_compacted_window_and_followup_memory(client):
@@ -490,7 +499,7 @@ def test_compact_endpoint_returns_compacted_window_and_followup_memory(client):
         "/v1/responses",
         json={"input": [*compacted_body["output"], {"role": "user", "content": "What is the preserved marker word?"}], "store": False},
     ).json()
-    assert followup["output_text"] == "Mock response: amethyst"
+    assert "amethyst" in followup["output_text"]
 
 
 def test_reasoning_output_item_and_usage(client):
@@ -863,7 +872,10 @@ def test_input_image_include_returns_safe_artifact_metadata(client):
 
 
 def test_background_response_create_poll_complete(client):
-    created = client.post("/v1/responses", json={"input": "background slow complete", "background": True, "store": True})
+    created = client.post(
+        "/v1/responses",
+        json={"input": "background complete", "background": True, "store": True, "metadata": mock_metadata(delay_seconds=0.15)},
+    )
 
     assert created.status_code == 200
     body = created.json()
@@ -875,12 +887,15 @@ def test_background_response_create_poll_complete(client):
     completed = poll_response(client, body["id"], expected={"completed"})
 
     assert completed["background"] is True
-    assert completed["output_text"] == "Mock response: background slow complete"
+    assert completed["output_text"] == "Mock response: background complete"
     assert completed["usage"]["total_tokens"] > 0
 
 
 def test_background_cancel_is_terminal_and_idempotent(client):
-    created = client.post("/v1/responses", json={"input": "background slow cancel", "background": True, "store": True}).json()
+    created = client.post(
+        "/v1/responses",
+        json={"input": "background cancel", "background": True, "store": True, "metadata": mock_metadata(delay_seconds=0.15)},
+    ).json()
 
     cancelled = client.post(f"/v1/responses/{created['id']}/cancel")
 
@@ -943,7 +958,10 @@ def test_background_timeout_marks_response_failed(tmp_path, monkeypatch):
         DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'timeout.db'}",
         BACKGROUND_JOB_TIMEOUT_SECONDS="0.05",
     ) as client:
-        created = client.post("/v1/responses", json={"input": "background timeout", "background": True, "store": True}).json()
+        created = client.post(
+            "/v1/responses",
+            json={"input": "background delay fixture", "background": True, "store": True, "metadata": mock_metadata(delay_seconds=0.25)},
+        ).json()
         failed = poll_response(client, created["id"], expected={"failed"})
 
     assert failed["status"] == "failed"
@@ -951,7 +969,10 @@ def test_background_timeout_marks_response_failed(tmp_path, monkeypatch):
 
 
 def test_background_metrics_include_job_signals(client):
-    created = client.post("/v1/responses", json={"input": "background slow metrics", "background": True, "store": True}).json()
+    created = client.post(
+        "/v1/responses",
+        json={"input": "background metrics", "background": True, "store": True, "metadata": mock_metadata(delay_seconds=0.05)},
+    ).json()
     poll_response(client, created["id"], expected={"completed"})
 
     response = client.get("/metrics")
@@ -1057,7 +1078,7 @@ def test_text_file_input_is_extracted_stored_and_replayed(client):
     assert file_part["filename"] == "facts.txt"
     assert file_part["text"] == file_text
 
-    followup = client.post("/v1/responses", json={"previous_response_id": created["id"], "input": "Use the previous file marker word."}).json()
+    followup = client.post("/v1/responses", json={"previous_response_id": created["id"], "input": "Use the previous file fact."}).json()
     assert "cobalt" in followup["output_text"]
 
 
@@ -1194,6 +1215,356 @@ def test_builtin_tools_are_explicitly_unsupported(client):
     assert codex_like_response.status_code == 400
     assert codex_like_response.json()["error"]["code"] == "unsupported_parameter"
     assert codex_like_response.json()["error"]["param"] == "tools.1.type"
+
+
+def test_web_search_required_returns_call_citations_and_retrieves(web_search_client):
+    response = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search the web for latest Respawn web search news",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "required",
+            "store": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["output"][0]["type"] == "web_search_call"
+    assert body["output"][0]["action"]["type"] == "search"
+    assert body["output"][0]["action"]["queries"] == ["Search the web for latest Respawn web search news"]
+    assert "sources" not in body["output"][0]["action"]
+    assert body["output"][1]["type"] == "message"
+    annotations = body["output"][1]["content"][0]["annotations"]
+    assert annotations
+    assert annotations[0]["type"] == "url_citation"
+    assert body["output_text"].startswith("Mock response:")
+
+    retrieved = web_search_client.get(f"/v1/responses/{body['id']}").json()
+    assert retrieved["output"][0]["type"] == "web_search_call"
+    assert retrieved["output"][1]["content"][0]["annotations"] == annotations
+
+    included = web_search_client.get(
+        f"/v1/responses/{body['id']}",
+        params={"include": "web_search_call.action.sources"},
+    ).json()
+    sources = included["output"][0]["action"]["sources"]
+    assert sources
+    assert sources[0]["url"] == "https://example.com/respawn-web-search"
+
+
+def test_web_search_auto_uses_model_tool_call(web_search_client):
+    response = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search the web for latest Respawn auto search details",
+            "tools": [{"type": "web_search"}],
+            "metadata": mock_metadata(tool_call="web_search"),
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output"][0]["type"] == "web_search_call"
+    assert body["output"][1]["type"] == "message"
+    assert all(item["type"] != "function_call" for item in body["output"])
+    assert body["output"][1]["content"][0]["annotations"][0]["type"] == "url_citation"
+    assert web_search_client.app.state.web_search_backend.requests[0].query == "Search the web for latest Respawn auto search details"
+
+
+def test_web_search_tool_choice_none_does_not_call_provider(web_search_client):
+    response = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "What is the latest Respawn news?",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output"][0]["type"] == "message"
+    assert all(item["type"] != "web_search_call" for item in body["output"])
+    assert web_search_client.app.state.web_search_backend.requests == []
+
+
+def test_web_search_filters_store_false_and_timeout(web_search_client):
+    filtered = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search the web for latest domain filter details",
+            "tools": [{"type": "web_search", "filters": {"blocked_domains": ["blocked.example.net"]}}],
+            "tool_choice": "required",
+            "include": ["web_search_call.action.sources"],
+            "store": False,
+        },
+    )
+    assert filtered.status_code == 200
+    body = filtered.json()
+    assert body["output"][0]["type"] == "web_search_call"
+    assert all("blocked.example.net" not in source["url"] for source in body["output"][0]["action"]["sources"])
+    assert web_search_client.get(f"/v1/responses/{body['id']}").status_code == 404
+
+    timeout = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search provider timeout fixture",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "required",
+            "metadata": mock_metadata(web_search_error="timeout"),
+        },
+    )
+    assert timeout.status_code == 504
+    assert timeout.json()["error"]["code"] == "web_search_timeout"
+
+
+def test_codex_like_namespace_plus_web_search_passes_web_search_validation(web_search_client):
+    accepted = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "search",
+            "client_metadata": {"x-codex-installation-id": "install-local-test"},
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__repo__",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "list_files",
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                        }
+                    ],
+                },
+                {"type": "web_search"},
+            ],
+            "tool_choice": "none",
+        },
+    )
+    assert accepted.status_code == 200
+
+    next_unsupported_tool = web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "search",
+            "tools": [
+                {"type": "web_search"},
+                {"type": "image_generation"},
+            ],
+        },
+    )
+    assert next_unsupported_tool.status_code == 400
+    assert next_unsupported_tool.json()["error"]["param"] == "tools.1.type"
+
+
+def test_image_generation_disabled_returns_openai_shaped_error(client):
+    response = client.post("/v1/responses", json={"input": "Generate image of a tiny house", "tools": [{"type": "image_generation"}]})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_parameter"
+    assert response.json()["error"]["param"] == "tools.0.type"
+
+
+def test_image_generation_auto_uses_model_tool_call(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of an auto tiny house",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output_text"] == ""
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert all(item["type"] != "function_call" for item in body["output"])
+    assert image_generation_client.app.state.image_generation_backend.requests[0].prompt == "Generate image of an auto tiny house"
+
+
+def test_image_generation_forced_returns_call_and_retrieves(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of a tiny house",
+            "tools": [{"type": "image_generation", "quality": "low", "size": "512x512"}],
+            "tool_choice": {"type": "image_generation"},
+            "store": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["output_text"] == ""
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert body["output"][0]["status"] == "completed"
+    assert body["output"][0]["result"]
+    assert body["output"][0]["size"] == "512x512"
+    assert body["output"][0]["quality"] == "low"
+    assert body["output"][0]["output_format"] == "png"
+
+    retrieved = image_generation_client.get(f"/v1/responses/{body['id']}").json()
+    assert retrieved["output"] == body["output"]
+
+    required = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of a required tiny house",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": "required",
+            "store": False,
+        },
+    )
+    assert required.status_code == 200
+    required_body = required.json()
+    assert required_body["output"][0]["type"] == "image_generation_call"
+    assert image_generation_client.get(f"/v1/responses/{required_body['id']}").status_code == 404
+
+
+def test_image_generation_followup_accepts_prior_web_search_call_item(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "id": "ws_prior",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "queries": ["cos'e kubernetes"],
+                        "sources": [
+                            {
+                                "url": "https://kubernetes.io/",
+                                "title": "Kubernetes",
+                                "snippet": "Production-grade container orchestration.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Kubernetes orchestra container."}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "genera una immagine di un rospo"}],
+                },
+            ],
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "tool_choice": {"type": "image_generation"},
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert body["output"][0]["status"] == "completed"
+
+
+def test_image_generation_tool_choice_none_and_codex_like_declaration_do_not_generate(image_generation_client):
+    codex_like = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "List files in this repository",
+            "client_metadata": {"x-codex-installation-id": "install-local-test"},
+            "tools": [{"type": "image_generation"}],
+        },
+    )
+    assert codex_like.status_code == 200
+    assert all(item["type"] != "image_generation_call" for item in codex_like.json()["output"])
+    assert image_generation_client.app.state.image_generation_backend.requests == []
+
+    disabled_by_choice = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of a tiny house",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": "none",
+        },
+    )
+    assert disabled_by_choice.status_code == 200
+    assert all(item["type"] != "image_generation_call" for item in disabled_by_choice.json()["output"])
+
+
+def test_image_generation_background_and_metrics(image_generation_client):
+    created = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of a tiny background house",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
+            "background": True,
+            "store": True,
+        },
+    )
+    assert created.status_code == 200
+    body = created.json()
+    completed = poll_response(image_generation_client, body["id"], expected={"completed"})
+    assert completed["background"] is True
+    assert completed["output"][0]["type"] == "image_generation_call"
+
+    timeout = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Image provider timeout fixture",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
+            "metadata": mock_metadata(image_generation_error="timeout"),
+        },
+    )
+    assert timeout.status_code == 504
+    assert timeout.json()["error"]["code"] == "image_generation_timeout"
+
+    metrics = image_generation_client.get("/metrics").text
+    assert "gateway_image_generation_requests_total" in metrics
+    assert "gateway_image_generation_latency_seconds_bucket" in metrics
+    assert "gateway_image_generation_errors_total" in metrics
+    assert "gateway_image_generation_pixels_total" in metrics
+
+
+def test_web_search_metrics_are_exposed(web_search_client):
+    web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search the web for latest metrics web search details",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "required",
+        },
+    )
+    web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search the web for latest filtered metrics details",
+            "tools": [{"type": "web_search", "filters": {"blocked_domains": ["blocked.example.net"]}}],
+            "tool_choice": "required",
+        },
+    )
+    web_search_client.post(
+        "/v1/responses",
+        json={
+            "input": "Metrics web search failure fixture",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "required",
+            "metadata": mock_metadata(web_search_error="timeout"),
+        },
+    )
+
+    metrics = web_search_client.get("/metrics").text
+    assert "gateway_web_search_requests_total" in metrics
+    assert "gateway_web_search_latency_seconds_bucket" in metrics
+    assert "gateway_web_search_results_total" in metrics
+    assert "gateway_web_search_errors_total" in metrics
+    assert "gateway_web_search_filtered_results_total" in metrics
 
 
 def test_invalid_prompt_cache_retention_is_explicit(client):
@@ -1371,9 +1742,93 @@ def test_function_tool_request_emits_function_call_without_executing(client):
             "status": "completed",
             "call_id": "call_mock_calculator",
             "name": "calculator",
-            "arguments": '{"expression":"2+2"}',
+            "arguments": '{"expression":"string"}',
         }
     ]
+
+
+def test_namespace_tool_request_emits_namespaced_function_call(client):
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "Use namespace tool please",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__repo__",
+                    "description": "Repository tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "list_files",
+                            "description": "List files in a path.",
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+                        }
+                    ],
+                }
+            ],
+            "tool_choice": {"type": "function", "namespace": "mcp__repo__", "name": "list_files"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output_text"] == ""
+    assert body["output"][0]["type"] == "function_call"
+    assert body["output"][0]["name"] == "list_files"
+    assert body["output"][0]["namespace"] == "mcp__repo__"
+
+
+def test_namespaced_function_call_output_followup_with_previous_response_id(client):
+    first = client.post(
+        "/v1/responses",
+        json={
+            "input": "Use namespace tool please",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__repo__",
+                    "description": "Repository tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "list_files",
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                        }
+                    ],
+                }
+            ],
+            "tool_choice": {"type": "function", "namespace": "mcp__repo__", "name": "list_files"},
+            "store": True,
+        },
+    ).json()
+    call = first["output"][0]
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first["id"],
+            "input": [{"type": "function_call_output", "call_id": call["call_id"], "output": '["README.md"]'}],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__repo__",
+                    "description": "Repository tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "list_files",
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                        }
+                    ],
+                }
+            ],
+            "store": True,
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["output_text"] == 'Tool result: ["README.md"]'
 
 
 def test_function_call_output_followup_with_previous_response_id(client):
@@ -1501,7 +1956,14 @@ def test_structured_output_accepts_sdk_text_format(client):
 
 
 def test_structured_output_repair_failure(client):
-    response = client.post("/v1/responses", json={"input": "repair failure", "response_format": {"type": "json_schema", "json_schema": {"schema": {"type": "object"}}}})
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "structured output failure fixture",
+            "metadata": mock_metadata(structured_output="always_invalid"),
+            "response_format": {"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+        },
+    )
     assert response.status_code == 502
 
 
@@ -1520,7 +1982,7 @@ def test_function_tool_loop_is_client_driven_not_executed_by_respawn(client):
     response = client.post(
         "/v1/responses",
         json={
-            "input": "loop forever",
+            "input": "function call loop guard",
             "tools": [{"type": "function", "name": "echo", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}],
             "tool_choice": "required",
         },

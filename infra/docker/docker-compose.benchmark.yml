@@ -3,6 +3,10 @@ services:
     environment:
       AUTH_DISABLED: "false"
       LOCAL_OPENAI_API_KEYS: ${RESPAWN_BENCHMARK_API_KEYS:-local-dev-key:tenant-local,respawn-other-key:tenant-other}
+      WEB_SEARCH_ENABLED: "true"
+      WEB_SEARCH_BACKEND: mock
+      IMAGE_GENERATION_ENABLED: "true"
+      IMAGE_GENERATION_BACKEND: mock
 
   respawn-benchmark:
     image: python:3.12-slim

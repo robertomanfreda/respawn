@@ -57,6 +57,16 @@ def input_to_messages(input_value: str | list[dict[str, Any]] | None, *, compact
         elif item_type == "function_call_output":
             _flush_tool_calls(messages, pending_tool_calls)
             messages.append({"role": "tool", "tool_call_id": str(item["call_id"]), "content": function_output_to_text(item.get("output", ""))})
+        elif item_type == "web_search_call":
+            _flush_tool_calls(messages, pending_tool_calls)
+            message = _web_search_message(item)
+            if message is not None:
+                messages.append(message)
+        elif item_type == "image_generation_call":
+            _flush_tool_calls(messages, pending_tool_calls)
+            message = _image_generation_message(item)
+            if message is not None:
+                messages.append(message)
         elif item_type == "tool_result":
             continue
         else:
@@ -75,6 +85,16 @@ def output_to_messages(output: list[dict[str, Any]], *, compaction_key: str | No
             messages.append({"role": item.get("role", "assistant"), "content": content_to_text(item.get("content", ""))})
         elif item.get("type") == "function_call":
             pending_tool_calls.append(_chat_tool_call(item))
+        elif item.get("type") == "web_search_call":
+            _flush_tool_calls(messages, pending_tool_calls)
+            message = _web_search_message(item)
+            if message is not None:
+                messages.append(message)
+        elif item.get("type") == "image_generation_call":
+            _flush_tool_calls(messages, pending_tool_calls)
+            message = _image_generation_message(item)
+            if message is not None:
+                messages.append(message)
         elif item.get("type") == "compaction":
             _flush_tool_calls(messages, pending_tool_calls)
             message = _compaction_message(item, compaction_key=compaction_key)
@@ -103,11 +123,14 @@ def assistant_text_to_output(
 
 
 def _chat_tool_call(item: dict[str, Any]) -> dict[str, Any]:
+    name = str(item["name"])
+    namespace = item.get("namespace")
+    backend_name = f"{namespace}{name}" if namespace is not None else name
     return {
         "id": str(item["call_id"]),
         "type": "function",
         "function": {
-            "name": str(item["name"]),
+            "name": backend_name,
             "arguments": _arguments_to_string(item.get("arguments", "{}")),
         },
     }
@@ -118,6 +141,42 @@ def _flush_tool_calls(messages: list[dict[str, Any]], pending_tool_calls: list[d
         return
     messages.append({"role": "assistant", "content": "", "tool_calls": list(pending_tool_calls)})
     pending_tool_calls.clear()
+
+
+def _web_search_message(item: dict[str, Any]) -> dict[str, str] | None:
+    action = item.get("action") if isinstance(item.get("action"), dict) else {}
+    sources = action.get("_respawn_sources") or action.get("sources") or []
+    if not isinstance(sources, list):
+        sources = []
+    query = ""
+    queries = action.get("queries")
+    if isinstance(queries, list) and queries:
+        query = str(queries[0])
+    lines = [f"Previous web search results for: {query}".strip()]
+    for index, source in enumerate(sources[:10], start=1):
+        if not isinstance(source, dict):
+            continue
+        title = str(source.get("title") or source.get("url") or f"Source {index}")
+        url = str(source.get("url") or "")
+        snippet = str(source.get("snippet") or "")
+        lines.append(f"[{index}] {title}\nURL: {url}\nSnippet: {snippet}".strip())
+    if len(lines) == 1:
+        return None
+    return {"role": "system", "content": "\n\n".join(lines)}
+
+
+def _image_generation_message(item: dict[str, Any]) -> dict[str, str] | None:
+    prompt = str(item.get("revised_prompt") or "").strip()
+    size = str(item.get("size") or "").strip()
+    if not prompt and not size:
+        return None
+    details = "Previous image generation output"
+    if prompt:
+        details += f" for prompt: {prompt}"
+    if size:
+        details += f"\nSize: {size}"
+    details += "\nThis is context only. Do not generate another image unless the latest user message explicitly asks for one or for a visual revision."
+    return {"role": "system", "content": details}
 
 
 def _compaction_message(item: dict[str, Any], *, compaction_key: str | None) -> dict[str, str] | None:

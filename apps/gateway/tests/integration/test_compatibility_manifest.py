@@ -12,7 +12,7 @@ def test_health_ready_include_safe_compatibility_metadata(client):
     assert ready.json()["default_model"] == "gpt-oss-120b"
     assert ready.json()["compatibility_manifest_version"] == health.json()["compatibility_manifest_version"]
     checks = ready.json()["checks"]
-    assert set(checks) == {"database", "ollama", "worker", "cache", "storage"}
+    assert set(checks) == {"database", "ollama", "worker", "cache", "storage", "web_search", "image_generation"}
     assert all(check["status"] == "ready" for check in checks.values())
 
 

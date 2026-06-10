@@ -30,6 +30,31 @@ async def test_ollama_list_models_uses_models_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_ollama_list_models_preserves_backend_model_metadata():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "gpt-oss:120b",
+                        "object": "model",
+                        "created": 123,
+                        "owned_by": "ollama",
+                        "context_window": 131072,
+                    }
+                ],
+            },
+        )
+
+    adapter = OllamaBackend("http://ollama.test/v1", 10, transport=httpx.MockTransport(handler))
+    result = await adapter.list_models()
+
+    assert result.data[0].model_dump()["context_window"] == 131072
+
+
+@pytest.mark.asyncio
 async def test_ollama_non_streaming_payload_and_usage_mapping():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/chat"

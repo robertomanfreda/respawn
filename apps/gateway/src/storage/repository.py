@@ -686,6 +686,29 @@ def _output_item_from_record(row: ResponseItemRecord) -> dict[str, Any]:
             "name": row.name,
             "arguments": row.arguments_json if row.arguments_json is not None else "{}",
         }
+    if row.type == "web_search_call":
+        content = row.content_json if isinstance(row.content_json, dict) else {}
+        return {
+            "id": row.id,
+            "type": "web_search_call",
+            "status": row.status,
+            "action": content.get("action") or {},
+        }
+    if row.type == "image_generation_call":
+        content = row.content_json if isinstance(row.content_json, dict) else {}
+        item = {
+            "id": row.id,
+            "type": "image_generation_call",
+            "status": row.status,
+            "result": content.get("result") or "",
+            "revised_prompt": content.get("revised_prompt") or "",
+            "size": content.get("size") or "",
+            "quality": content.get("quality") or "",
+            "output_format": content.get("output_format") or "png",
+        }
+        if content.get("seed") is not None:
+            item["seed"] = content.get("seed")
+        return item
     item = {
         "id": row.id,
         "type": row.type,
@@ -710,6 +733,17 @@ def _content_json_from_item(item: dict[str, Any]) -> Any:
         if item.get("encrypted_content") is not None:
             content["encrypted_content"] = item.get("encrypted_content")
         return content
+    if item.get("type") == "web_search_call":
+        return {"action": item.get("action") or {}}
+    if item.get("type") == "image_generation_call":
+        return {
+            "result": item.get("result") or "",
+            "revised_prompt": item.get("revised_prompt") or "",
+            "size": item.get("size") or "",
+            "quality": item.get("quality") or "",
+            "output_format": item.get("output_format") or "png",
+            "seed": item.get("seed"),
+        }
     return item.get("content", [])
 
 

@@ -20,6 +20,8 @@ def service(request: Request, session: AsyncSession) -> ResponseService:
         settings=request.app.state.settings,
         repository=ResponseRepository(session),
         backend=request.app.state.backend,
+        web_search_backend=request.app.state.web_search_backend,
+        image_generation_backend=request.app.state.image_generation_backend,
         prompt_cache=request.app.state.prompt_cache,
         session_factory=request.app.state.async_session,
         background_tasks=request.app.state.background_tasks,

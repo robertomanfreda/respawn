@@ -11,6 +11,7 @@ import pytest
 from openai import BadRequestError, ConflictError, InternalServerError, NotFoundError, OpenAI, UnprocessableEntityError
 from uvicorn import Config, Server
 
+from src.adapters.mock_control import mock_metadata
 from src.config import get_settings
 from src.main import create_app
 
@@ -21,6 +22,8 @@ BASE_ENV = {
     "DEFAULT_MODEL": "gpt-oss-120b",
     "FILE_STORAGE_BACKEND": "database",
     "PROMPT_CACHE_MIN_TOKENS": "8",
+    "WEB_SEARCH_ENABLED": "false",
+    "IMAGE_GENERATION_ENABLED": "false",
 }
 
 RESPONSE_SNAPSHOT_KEYS = {
@@ -100,7 +103,7 @@ def test_python_sdk_stream_background_and_function_followup(tmp_path, monkeypatc
         assert event_types[-1] in {"response.completed", "response.incomplete"}
         assert [getattr(event, "sequence_number", None) for event in events] == list(range(len(events)))
 
-        background = sdk.responses.create(model="gpt-oss-120b", input="background slow sdk", background=True)
+        background = sdk.responses.create(model="gpt-oss-120b", input="background sdk", background=True, metadata=mock_metadata(delay_seconds=0.15))
         cancelled = sdk.responses.cancel(background.id)
         assert background.background is True
         assert cancelled.status in {"cancelled", "completed", "incomplete"}
@@ -123,6 +126,47 @@ def test_python_sdk_stream_background_and_function_followup(tmp_path, monkeypatc
             tools=tools,
         )
         assert followup.output_text == "Tool result: 4"
+
+
+def test_python_sdk_web_search_shape(tmp_path, monkeypatch):
+    with sdk_server(tmp_path, monkeypatch, WEB_SEARCH_ENABLED="true", WEB_SEARCH_BACKEND="mock") as sdk:
+        created = sdk.responses.create(
+            model="gpt-oss-120b",
+            input="Search the web for latest SDK web search details",
+            tools=[{"type": "web_search"}],
+            tool_choice="required",
+        )
+        body = created.model_dump()
+        assert body["output"][0]["type"] == "web_search_call"
+        assert body["output"][1]["type"] == "message"
+        assert created.output_text.startswith("Mock response:")
+        annotations = body["output"][1]["content"][0]["annotations"]
+        assert annotations[0]["type"] == "url_citation"
+        assert annotations[0]["url"].startswith("https://")
+
+
+def test_python_sdk_image_generation_shape(tmp_path, monkeypatch):
+    with sdk_server(tmp_path, monkeypatch, IMAGE_GENERATION_ENABLED="true", IMAGE_GENERATION_BACKEND="mock") as sdk:
+        auto = sdk.responses.create(
+            model="gpt-oss-120b",
+            input="Generate image of an SDK auto square",
+            tools=[{"type": "image_generation"}],
+            metadata=mock_metadata(tool_call="image_generation"),
+            store=False,
+        )
+        assert auto.model_dump()["output"][0]["type"] == "image_generation_call"
+
+        created = sdk.responses.create(
+            model="gpt-oss-120b",
+            input="Generate image of an SDK test square",
+            tools=[{"type": "image_generation", "quality": "low"}],
+            tool_choice={"type": "image_generation"},
+        )
+        body = created.model_dump()
+        assert body["output_text"] == ""
+        assert body["output"][0]["type"] == "image_generation_call"
+        assert body["output"][0]["result"]
+        assert body["output"][0]["output_format"] == "png"
 
 
 def test_python_sdk_idempotency_and_error_classes(tmp_path, monkeypatch):

@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 
-MANIFEST_VERSION = "phase-16"
+MANIFEST_VERSION = "phase-18"
 MANIFEST_SOURCE = "docs/COMPATIBILITY.md"
 
 
@@ -228,20 +228,65 @@ FEATURES: list[dict[str, Any]] = [
     {
         "id": "request.function_tools",
         "category": "request_field",
-        "surface": "tools entries with type=function",
+        "surface": "tools entries with type=function and namespace-wrapped function tools",
         "status": "supported",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.function_call",
-        "notes": "Function tools are protocol data only; Respawn never executes them.",
+        "notes": "Function and namespace-wrapped function tools are protocol data only; Respawn never executes them.",
+    },
+    {
+        "id": "request.web_search_tool",
+        "category": "request_field",
+        "surface": "tools entries with type=web_search or web_search_preview",
+        "status": "supported_local",
+        "tags": ["tools", "web_search"],
+        "benchmark_case": "responses.web_search.basic",
+        "notes": "Respawn executes query-style local web search through the configured provider when WEB_SEARCH_ENABLED=true.",
+    },
+    {
+        "id": "request.web_search_filters",
+        "category": "request_field",
+        "surface": "web_search filters.allowed_domains and filters.blocked_domains",
+        "status": "supported_local",
+        "tags": ["tools", "web_search"],
+        "benchmark_case": "responses.web_search.filters",
+        "notes": "Per-request filters are validated and enforced after provider results return. Operator-level block lists always win.",
+    },
+    {
+        "id": "request.web_search_disabled_error",
+        "category": "request_field",
+        "surface": "disabled or cache-only web_search error paths",
+        "status": "supported_local",
+        "tags": ["tools", "web_search"],
+        "benchmark_case": "responses.web_search.disabled",
+        "notes": "Disabled web search and external_web_access=false without a cache provider return explicit OpenAI-shaped unsupported_parameter errors.",
+    },
+    {
+        "id": "request.image_generation_tool",
+        "category": "request_field",
+        "surface": "tools entries with type=image_generation for local text-to-image",
+        "status": "supported_local",
+        "tags": ["tools", "image_generation"],
+        "benchmark_case": "responses.image_generation.basic",
+        "notes": "Respawn executes text-to-image generation through the configured local image backend, including ComfyUI, when IMAGE_GENERATION_ENABLED=true.",
+    },
+    {
+        "id": "request.image_generation_disabled_error",
+        "category": "request_field",
+        "surface": "disabled, unsupported, or malformed image_generation error paths",
+        "status": "supported_local",
+        "tags": ["tools", "image_generation"],
+        "benchmark_case": "responses.image_generation.disabled",
+        "notes": "Disabled image generation and unsupported image_generation fields return explicit OpenAI-shaped errors.",
     },
     {
         "id": "request.tool_choice",
         "category": "request_field",
-        "surface": "tool_choice auto, none, required, forced function, and allowed_tools",
+        "surface": "tool_choice auto, none, required, forced function, allowed_tools, web_search, and image_generation choices",
         "status": "supported_local",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.tool_choice_forced_function",
-        "notes": "Mapped to the configured backend where possible; required/forced choices fail with a capability error if the backend/model does not emit the requested function_call.",
+        "notes": "Function choices are mapped to the configured backend where possible. web_search and image_generation required/none choices are enforced locally before backend generation.",
     },
     {
         "id": "request.parallel_and_max_tool_calls",
@@ -255,11 +300,11 @@ FEATURES: list[dict[str, Any]] = [
     {
         "id": "request.unsupported_tool_categories",
         "category": "request_field",
-        "surface": "built-in, MCP, custom free-form, shell, apply_patch, web/file/code/computer/image/internal tools",
+        "surface": "hosted MCP, custom free-form, shell, apply_patch, file/code/computer/internal tools, image edit/partial-image modes, and browser actions",
         "status": "unsupported",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.unsupported_builtin_tools",
-        "notes": "Only function tool protocol data is supported. Hosted or local tool execution remains out of scope.",
+        "notes": "Function protocol data, local query-style web_search, and local text-to-image image_generation are supported. Other hosted or local tool execution remains out of scope.",
     },
     {
         "id": "request.structured_output",
@@ -431,11 +476,11 @@ FEATURES: list[dict[str, Any]] = [
     {
         "id": "request.include_hosted_tool_expansions",
         "category": "request_field",
-        "surface": "file_search/web_search/code_interpreter/computer include expansions",
+        "surface": "file_search/web_search results/code_interpreter/computer include expansions",
         "status": "unsupported",
         "tags": ["tools"],
         "benchmark_case": "responses.include.hosted_tool_unsupported",
-        "notes": "These include values are valid OpenAI values but require hosted tool execution, which Respawn deliberately does not provide.",
+        "notes": "These include values are valid OpenAI values but require hosted tool execution. web_search_call.action.sources is supported for Respawn-local web search.",
     },
     {
         "id": "request.future_unsupported_fields",
@@ -661,6 +706,24 @@ FEATURES: list[dict[str, Any]] = [
         "notes": "When a response uses local input_file extraction, output_text carries OpenAI-shaped file_citation annotations pointing at local response artifact IDs.",
     },
     {
+        "id": "io.web_search_call_items",
+        "category": "input_output",
+        "surface": "web_search_call output items",
+        "status": "supported_local",
+        "tags": ["tools", "web_search"],
+        "benchmark_case": "responses.web_search.basic",
+        "notes": "When local web search runs, Respawn emits an OpenAI-shaped web_search_call item before the final assistant message.",
+    },
+    {
+        "id": "io.image_generation_call_items",
+        "category": "input_output",
+        "surface": "image_generation_call output items with base64 image result",
+        "status": "supported_local",
+        "tags": ["tools", "image_generation"],
+        "benchmark_case": "responses.image_generation.basic",
+        "notes": "When local image generation runs, Respawn emits an OpenAI-shaped image_generation_call item containing the generated PNG as base64.",
+    },
+    {
         "id": "io.input_audio_unsupported",
         "category": "input_output",
         "surface": "input_audio",
@@ -720,6 +783,15 @@ FEATURES: list[dict[str, Any]] = [
         "notes": "Respawn stores and retrieves backend-provided logprobs, and fails explicitly when the configured backend/model cannot provide them.",
     },
     {
+        "id": "response.web_search_citations",
+        "category": "response_object",
+        "surface": "url_citation annotations from local web search",
+        "status": "supported_local",
+        "tags": ["tools", "web_search"],
+        "benchmark_case": "responses.web_search.citations",
+        "notes": "Respawn maps model source markers when present and otherwise attaches bounded URL citations to the generated text.",
+    },
+    {
         "id": "response.incomplete_status",
         "category": "response_object",
         "surface": "status=incomplete with incomplete_details.reason when max output exhaustion is detectable",
@@ -767,6 +839,15 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["reasoning", "state"],
         "benchmark_case": "responses.reasoning.previous_response_carryover",
+    },
+    {
+        "id": "state.web_search_item_storage",
+        "category": "state",
+        "surface": "stored and retrieved web_search_call items and annotations",
+        "status": "supported_local",
+        "tags": ["tools", "web_search", "state"],
+        "benchmark_case": "responses.web_search.retrieve",
+        "notes": "Stored Responses preserve web_search_call output items, URL annotations, and source metadata for include=web_search_call.action.sources.",
     },
     {
         "id": "streaming.text_lifecycle",
@@ -865,6 +946,22 @@ FEATURES: list[dict[str, Any]] = [
         "benchmark_case": "responses.tools.stream_arguments",
     },
     {
+        "id": "streaming.web_search_call_events",
+        "category": "streaming_event",
+        "surface": "response.output_item.added/done for web_search_call before assistant text",
+        "status": "supported_local",
+        "tags": ["streaming", "tools", "web_search"],
+        "benchmark_case": "responses.web_search.stream",
+    },
+    {
+        "id": "streaming.image_generation_call_events",
+        "category": "streaming_event",
+        "surface": "response.output_item.added/done for image_generation_call",
+        "status": "supported_local",
+        "tags": ["streaming", "tools", "image_generation"],
+        "benchmark_case": "responses.image_generation.stream",
+    },
+    {
         "id": "observability.metrics",
         "category": "observability",
         "surface": "/metrics gateway, model, token, and Ollama signals",
@@ -887,6 +984,22 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported",
         "tags": ["tools", "observability"],
         "benchmark_case": "metrics.function_tools",
+    },
+    {
+        "id": "observability.web_search_metrics",
+        "category": "observability",
+        "surface": "web search request, latency, result, error, and filtered-result metrics",
+        "status": "supported_local",
+        "tags": ["tools", "web_search", "observability"],
+        "benchmark_case": "metrics.web_search",
+    },
+    {
+        "id": "observability.image_generation_metrics",
+        "category": "observability",
+        "surface": "image generation request, latency, error, and pixel metrics",
+        "status": "supported_local",
+        "tags": ["tools", "image_generation", "observability"],
+        "benchmark_case": "metrics.image_generation",
     },
     {
         "id": "observability.reasoning_metrics",

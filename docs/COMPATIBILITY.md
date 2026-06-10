@@ -6,10 +6,10 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 
 ## Summary
 
-- Manifest version: `phase-16`
+- Manifest version: `phase-18`
 - Manifest source: `docs/COMPATIBILITY.md`
-- Total tracked features: `115`
-- Supported or conditionally supported: `108`
+- Total tracked features: `128`
+- Supported or conditionally supported: `121`
 - Explicitly unsupported: `7`
 
 | Status | Count | Meaning |
@@ -17,15 +17,16 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `supported` | 50 | OpenAI-shaped behavior is implemented and benchmarked. |
 | `supported_backend_capability` | 4 | The request/response shape is supported, but success depends on configured backend/model capability. |
 | `supported_estimated` | 1 | Respawn returns a deterministic local estimate rather than hosted-provider authoritative data. |
-| `supported_local` | 52 | Respawn implements the behavior with local single-instance semantics. |
+| `supported_local` | 65 | Respawn implements the behavior with local single-instance semantics. |
 | `supported_text_only` | 1 | Implemented for the current text-only scope. |
 | `unsupported` | 7 | Rejected explicitly or deliberately outside Respawn scope. |
 
 ## Explicit Product Boundaries
 
 - Respawn does not implement the OpenAI Conversations API. Continuity is modeled with stored Responses and `previous_response_id`.
-- Respawn supports function tool calling as protocol data only. Clients execute functions and return `function_call_output`; Respawn does not execute tools locally.
-- Hosted tool execution, MCP hosting, shell/filesystem/git/workspace/browser/code-computer/image tool execution, and built-in hosted tool result expansion are outside scope.
+- Respawn supports function tool calling, including namespace-wrapped function tools, as protocol data only. Clients execute functions and return `function_call_output`; Respawn does not execute function tools locally.
+- Respawn supports query-style `web_search` as an opt-in local feature through a configured search provider.
+- Respawn supports text-to-image `image_generation` as an opt-in local feature through a configured ComfyUI, Automatic1111, or mock image backend. Image editing, partial-image streaming, browser actions, page clicking, screenshots, form input, hosted MCP, shell/filesystem/git/workspace/code-computer tool execution, and hosted tool result expansion remain outside scope.
 - Audio and realtime/transcription surfaces are not implemented.
 - Multi-deployment orchestration, distributed prompt caches, dynamic backend routing, and multi-replica consistency are outside the current product model.
 - Backend-specific capabilities such as vision or token logprobs depend on the configured backend/model capability metadata.
@@ -62,10 +63,15 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `request.background` | background=true | `supported` | `responses.background.create_poll_complete` | Requires store=true; streaming background responses are rejected until streaming replay/resume is implemented. |
 | `request.background_store_requirement` | background=true with store=false | `supported` | `responses.background.store_false_invalid` | Rejected with an OpenAI-shaped invalid_request error because background responses must be pollable. |
 | `request.sampling_and_limits` | temperature, top_p, max_output_tokens | `supported` | `responses.blocking` |  |
-| `request.function_tools` | tools entries with type=function | `supported` | `responses.tools.function_call` | Function tools are protocol data only; Respawn never executes them. |
-| `request.tool_choice` | tool_choice auto, none, required, forced function, and allowed_tools | `supported_local` | `responses.tools.tool_choice_forced_function` | Mapped to the configured backend where possible; required/forced choices fail with a capability error if the backend/model does not emit the requested function_call. |
+| `request.function_tools` | tools entries with type=function and namespace-wrapped function tools | `supported` | `responses.tools.function_call` | Function and namespace-wrapped function tools are protocol data only; Respawn never executes them. |
+| `request.web_search_tool` | tools entries with type=web_search or web_search_preview | `supported_local` | `responses.web_search.basic` | Opt-in via `WEB_SEARCH_ENABLED=true`; Respawn executes query-style search through the configured provider and injects bounded result context before backend generation. |
+| `request.web_search_filters` | web_search filters.allowed_domains and filters.blocked_domains | `supported_local` | `responses.web_search.filters` | Per-request filters are validated and enforced locally after provider results return. Operator-level block lists always win. |
+| `request.web_search_disabled_error` | disabled or cache-only web_search error paths | `supported_local` | `responses.web_search.disabled` | Disabled web search and `external_web_access=false` without a cache provider return explicit OpenAI-shaped unsupported_parameter errors. |
+| `request.image_generation_tool` | tools entries with type=image_generation for local text-to-image | `supported_local` | `responses.image_generation.basic` | Opt-in via `IMAGE_GENERATION_ENABLED=true`; Respawn executes text-to-image generation through the configured local image backend. |
+| `request.image_generation_disabled_error` | disabled, unsupported, or malformed image_generation error paths | `supported_local` | `responses.image_generation.disabled` | Disabled image generation and unsupported image_generation fields return explicit OpenAI-shaped errors. |
+| `request.tool_choice` | tool_choice auto, none, required, forced function, allowed_tools, web_search, and image_generation choices | `supported_local` | `responses.tools.tool_choice_forced_function` | Function choices are mapped to the configured backend where possible. `web_search` and `image_generation` required/none choices are enforced locally before backend generation. |
 | `request.parallel_and_max_tool_calls` | parallel_tool_calls, max_tool_calls | `supported_local` | `responses.tools.parallel_or_capability_error` | Respawn validates and enforces these limits around backend output instead of silently ignoring them. |
-| `request.unsupported_tool_categories` | built-in, MCP, custom free-form, shell, apply_patch, web/file/code/computer/image/internal tools | `unsupported` | `responses.tools.unsupported_builtin_tools` | Only function tool protocol data is supported. Hosted or local tool execution remains out of scope. |
+| `request.unsupported_tool_categories` | hosted MCP, custom free-form, shell, apply_patch, file/code/computer/internal tools, image edit/partial-image modes, and browser actions | `unsupported` | `responses.tools.unsupported_builtin_tools` | Function protocol data, local query-style `web_search`, and local text-to-image `image_generation` are supported. Other hosted or local tool execution remains out of scope. |
 | `request.structured_output` | response_format, text.format | `supported` | `responses.structured_output` |  |
 | `request.text_format` | text.format={type:text\|json_object\|json_schema} | `supported` | `responses.shape.blocking_text` |  |
 | `request.metadata` | metadata | `supported` | `responses.shape.metadata_retrieve` |  |
@@ -85,7 +91,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `request.unsupported_fields` | user and unsupported include values | `unsupported` | `responses.unsupported_field` | Unsupported request fields return explicit OpenAI-shaped errors. |
 | `request.include_input_image_url` | include=message.input_image.image_url | `supported_local` | `responses.include.file_artifacts` | Respawn preserves input image URL/source metadata and expands a safe local artifact descriptor when requested. |
 | `request.include_output_text_logprobs` | include=message.output_text.logprobs and top_logprobs | `supported_backend_capability` | `responses.include.unsupported_logprobs` | Returned only when the configured backend/model is marked with the logprobs capability and actually returns token logprobs. Ollama/gpt-oss defaults return unsupported_model_capability. |
-| `request.include_hosted_tool_expansions` | file_search/web_search/code_interpreter/computer include expansions | `unsupported` | `responses.include.hosted_tool_unsupported` | These include values are valid OpenAI values but require hosted tool execution, which Respawn deliberately does not provide. |
+| `request.include_hosted_tool_expansions` | file_search/web_search results/code_interpreter/computer include expansions | `unsupported` | `responses.include.hosted_tool_unsupported` | These include values are valid OpenAI values but require hosted tool execution. `web_search_call.action.sources` is supported for Respawn-local web search. |
 | `request.future_unsupported_fields` | future-only fields without a local Respawn equivalent | `unsupported` | `responses.shape.unsupported_user_field` | Known unsupported fields such as the deprecated user field fail with unsupported_parameter; unknown extra fields fail schema validation. |
 
 ### Input And Output Items
@@ -104,6 +110,8 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `io.input_file_file_id` | input_file.file_id referencing local Files API uploads | `supported_local` | `responses.input_file.file_id` | Uploaded user_data/assistants files are resolved through the tenant-scoped local Files API and extracted before backend generation. |
 | `io.input_file_limits` | input_file MIME/extension, size, and download errors | `supported` | `responses.multimodal.file_limits` |  |
 | `io.output_text_file_annotations` | output_text annotations for local input_file citations | `supported_local` | `responses.include.annotations` | When a response uses local input_file extraction, output_text carries OpenAI-shaped file_citation annotations pointing at local response artifact IDs. |
+| `io.web_search_call_items` | web_search_call output items | `supported_local` | `responses.web_search.basic` | When local web search runs, Respawn emits an OpenAI-shaped `web_search_call` item before the final assistant message. |
+| `io.image_generation_call_items` | image_generation_call output items with base64 image result | `supported_local` | `responses.image_generation.basic` | When local image generation runs, Respawn emits an OpenAI-shaped `image_generation_call` item containing the generated PNG as base64. |
 | `io.input_audio_unsupported` | input_audio | `unsupported` | `responses.multimodal.input_audio_unsupported` | Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription phase exists. |
 | `io.built_in_tool_items` | built-in tool call output items | `unsupported` | `responses.tools.unsupported_builtin_tools` | Built-in/internal tool execution remains out of scope even after function-tool protocol support. |
 
@@ -116,6 +124,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `response.request_settings` | input, instructions, max_output_tokens, previous_response_id, service_tier, store, temperature, text, top_p, truncation, tools, tool_choice, max_tool_calls, parallel_tool_calls | `supported` | `responses.shape.blocking_text` |  |
 | `response.output_content_shape` | output text content includes annotations and logprobs arrays | `supported` | `responses.shape.blocking_text` |  |
 | `response.output_text_logprobs` | output_text.logprobs populated from backend token logprobs | `supported_backend_capability` | `responses.include.unsupported_logprobs` | Respawn stores and retrieves backend-provided logprobs, and fails explicitly when the configured backend/model cannot provide them. |
+| `response.web_search_citations` | url_citation annotations from local web search | `supported_local` | `responses.web_search.citations` | Respawn maps model source markers when present and otherwise attaches bounded URL citations to the generated text. |
 | `response.incomplete_status` | status=incomplete with incomplete_details.reason when max output exhaustion is detectable | `supported_local` | `responses.shape.max_output_incomplete` |  |
 | `response.compaction_object` | response.compaction object from POST /v1/responses/compact | `supported_local` | `responses.compact` |  |
 | `response.cached_tokens` | usage.input_tokens_details.cached_tokens | `supported_local` | `responses.prompt_cache.in_memory` |  |
@@ -145,6 +154,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `state.function_tool_previous_response_replay` | previous_response_id replay for function_call/function_call_output turns | `supported` | `responses.tools.previous_response_replay` |  |
 | `state.function_tool_input_item_listing` | GET /v1/responses/{id}/input_items for function_call_output items | `supported` | `responses.tools.input_items_function_output` |  |
 | `state.reasoning_previous_response_carryover` | stored reasoning items through previous_response_id chains | `supported_local` | `responses.reasoning.previous_response_carryover` |  |
+| `state.web_search_item_storage` | stored and retrieved web_search_call items and annotations | `supported_local` | `responses.web_search.retrieve` | Stored Responses preserve `web_search_call` output items, URL annotations, and source metadata for `include=web_search_call.action.sources`. |
 
 ### Streaming Events
 
@@ -156,6 +166,8 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `streaming.incomplete` | response.incomplete terminal event when max-output exhaustion is detectable | `supported_local` | `responses.stream.incomplete` |  |
 | `streaming.failure` | response.failed, error | `supported` | `responses.stream.failure` |  |
 | `streaming.function_call_arguments` | response.function_call_arguments.delta, response.function_call_arguments.done | `supported` | `responses.tools.stream_arguments` |  |
+| `streaming.web_search_call_events` | response.output_item.added/done for web_search_call before assistant text | `supported_local` | `responses.web_search.stream` |  |
+| `streaming.image_generation_call_events` | response.output_item.added/done for image_generation_call | `supported_local` | `responses.image_generation.stream` |  |
 
 ### SDK Contract
 
@@ -175,6 +187,8 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `observability.metrics` | /metrics gateway, model, token, and Ollama signals | `supported` | `metrics` |  |
 | `observability.background_metrics` | background job counters, running gauge, and latency histogram | `supported` | `metrics.background_jobs` |  |
 | `observability.function_tool_metrics` | function tool protocol request/call/output/unsupported/capability counters | `supported` | `metrics.function_tools` |  |
+| `observability.web_search_metrics` | web search request, latency, result, error, and filtered-result metrics | `supported_local` | `metrics.web_search` |  |
+| `observability.image_generation_metrics` | image generation request, latency, error, and pixel metrics | `supported_local` | `metrics.image_generation` |  |
 | `observability.reasoning_metrics` | reasoning request, token, and heavy-request counters | `supported_local` | `metrics.reasoning` |  |
 | `observability.context_metrics` | context compaction, truncation, overflow, token before/after, and compression ratio metrics | `supported_local` | `metrics.context_management` |  |
 | `observability.include_metrics` | include expansion counters, byte counters, and capability-error counters | `supported_local` | `metrics.include_expansions` |  |
@@ -185,7 +199,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 
 | Feature ID | Surface | Status | Benchmark | Notes |
 | --- | --- | --- | --- | --- |
-| `ops.readiness_checks` | GET /readyz checks database, Ollama/backend, worker, cache, and storage readiness | `supported_local` | `readyz` |  |
+| `ops.readiness_checks` | GET /readyz checks database, Ollama/backend, worker, cache, storage, optional web_search, and optional image_generation readiness | `supported_local` | `readyz` |  |
 | `ops.ollama_unavailable` | Ollama/backend outage visibility through OpenAI-shaped 5xx errors, backend metrics, and operational failure metrics | `supported_local` | `ops.ollama_unavailable` |  |
 | `ops.concurrent_streaming` | single-instance concurrent Responses streaming isolation | `supported_local` | `ops.concurrent_streaming` |  |
 | `ops.concurrent_background` | single-instance concurrent background job isolation | `supported_local` | `ops.concurrent_background` |  |

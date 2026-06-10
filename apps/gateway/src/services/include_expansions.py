@@ -12,11 +12,11 @@ from src.services.model_capabilities import capabilities_for_model
 REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
 OUTPUT_TEXT_LOGPROBS = "message.output_text.logprobs"
 INPUT_IMAGE_URL = "message.input_image.image_url"
+WEB_SEARCH_ACTION_SOURCES = "web_search_call.action.sources"
 
 HOSTED_TOOL_INCLUDES = {
     "file_search_call.results",
     "web_search_call.results",
-    "web_search_call.action.sources",
     "computer_call_output.output.image_url",
     "code_interpreter_call.outputs",
 }
@@ -34,6 +34,7 @@ INCLUDE_REGISTRY = {
     REASONING_ENCRYPTED_CONTENT: IncludeFeature(REASONING_ENCRYPTED_CONTENT, "io.reasoning_encrypted_content", True),
     INPUT_IMAGE_URL: IncludeFeature(INPUT_IMAGE_URL, "io.input_image_url_include", True),
     OUTPUT_TEXT_LOGPROBS: IncludeFeature(OUTPUT_TEXT_LOGPROBS, "io.output_text_logprobs", True, capability="logprobs"),
+    WEB_SEARCH_ACTION_SOURCES: IncludeFeature(WEB_SEARCH_ACTION_SOURCES, "io.web_search_call_sources", True),
     **{
         value: IncludeFeature(value, f"hosted.{value}", False)
         for value in HOSTED_TOOL_INCLUDES

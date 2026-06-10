@@ -13,6 +13,10 @@ services:
       DEFAULT_MODEL: gpt-oss-120b
       VISION_MODEL: moondream
       MODEL_CAPABILITIES: gpt-oss-120b=text,file-text,reasoning,tools;moondream=text,file-text,vision
+      WEB_SEARCH_ENABLED: "true"
+      WEB_SEARCH_BACKEND: mock
+      IMAGE_GENERATION_ENABLED: "true"
+      IMAGE_GENERATION_BACKEND: mock
       BACKGROUND_JOB_TIMEOUT_SECONDS: "0.05"
       AUTO_CREATE_TABLES: "true"
 

@@ -25,6 +25,12 @@ manifest version.
 - `cache`: verifies the in-process prompt cache exists.
 - `storage`: validates the configured file storage backend and filesystem path
   when `FILE_STORAGE_BACKEND=filesystem`.
+- `web_search`: reports `enabled=false` when local web search is disabled; when
+  enabled, it verifies the configured web search backend responds within the
+  bounded timeout.
+- `image_generation`: reports `enabled=false` when local image generation is
+  disabled; when enabled, it verifies the configured image generation backend
+  responds within the bounded timeout.
 
 Readiness emits `gateway_readiness_check` and
 `gateway_readiness_check_latency_seconds` for each check. A failed check returns
@@ -71,6 +77,14 @@ VictoriaMetrics in the Compose stack. Core operational families include:
 - Context, include, prompt cache, and files:
   `gateway_context_*`, `gateway_response_include_*`,
   `gateway_prompt_cache_*`, `gateway_storage_operations_total`
+- Web search: `gateway_web_search_requests_total`,
+  `gateway_web_search_latency_seconds`, `gateway_web_search_results_total`,
+  `gateway_web_search_errors_total`,
+  `gateway_web_search_filtered_results_total`
+- Image generation: `gateway_image_generation_requests_total`,
+  `gateway_image_generation_latency_seconds`,
+  `gateway_image_generation_errors_total`,
+  `gateway_image_generation_pixels_total`
 - Ollama native throughput/debug detail: `gateway_ollama_eval_*`
 
 The provisioned `Respawn Model Gateway` Grafana dashboard groups panels into
@@ -81,6 +95,74 @@ across Ollama today and future backends such as vLLM. The model variable is
 backed by `gateway_backend_model_info`, so synthetic benchmark labels such as
 `respawn-missing-model-*` remain visible in raw error metrics but are excluded
 from the normal model performance views.
+
+## Local Web Search
+
+Responses `web_search` is off by default. Enable it only when operators want
+Respawn to execute query-style search through a configured provider:
+
+```env
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_BACKEND=searxng
+WEB_SEARCH_BASE_URL=http://searxng:8080
+```
+
+For the Docker stack, start SearXNG with the opt-in profile:
+
+```bash
+cd infra/docker
+WEB_SEARCH_ENABLED=true docker compose --env-file env.example --profile web-search up -d searxng respawn
+```
+
+The benchmark mock profile uses `WEB_SEARCH_BACKEND=mock` so feature coverage is
+deterministic and does not require a real external search engine. Production or
+shared environments should prefer `searxng`, short timeouts, and operator
+allow/block lists:
+
+```env
+WEB_SEARCH_TIMEOUT_SECONDS=10
+WEB_SEARCH_MAX_RESULTS=5
+WEB_SEARCH_MAX_RESULT_CHARS=12000
+WEB_SEARCH_ALLOWED_DOMAINS=
+WEB_SEARCH_BLOCKED_DOMAINS=
+```
+
+Respawn does not fetch arbitrary pages, click links, run browser actions, or
+grant general outbound access to other tool categories. `external_web_access=false`
+is rejected until a cache-only provider exists.
+
+## Local Image Generation
+
+Responses `image_generation` is off by default. Enable it only when operators
+want Respawn to call a configured local text-to-image backend. ComfyUI is the
+recommended runtime for ARM64/GB10 hosts; Automatic1111 remains available as a
+legacy external backend:
+
+```env
+IMAGE_GENERATION_ENABLED=true
+IMAGE_GENERATION_BACKEND=comfyui
+IMAGE_GENERATION_BASE_URL=http://comfyui:8188
+IMAGE_GENERATION_MODEL=sd-v1-5.safetensors
+IMAGE_GENERATION_DEFAULT_SIZE=512x512
+IMAGE_GENERATION_DEFAULT_STEPS=8
+```
+
+Respawn does not download SD1.5 checkpoints itself. For local Compose runs,
+start the optional ComfyUI container with the image-generation profile:
+
+```bash
+cd infra/docker
+docker compose --env-file env --profile image-generation up
+```
+
+The profile exposes ComfyUI at `http://comfyui:8188` for Respawn and at
+`http://localhost:8188` for the host. The Compose image is built from an NVIDIA
+PyTorch base image that has ARM64 manifests, so it avoids the amd64-only
+Automatic1111 image that fails on GB10 with `exec format error`. Place the SD1.5
+checkpoint under `COMFYUI_DATA_PATH/models/checkpoints` and set
+`IMAGE_GENERATION_MODEL` to that checkpoint filename. The benchmark mock profile
+uses `IMAGE_GENERATION_BACKEND=mock` so feature coverage does not require a real
+checkpoint download.
 
 ## Failure Injection
 

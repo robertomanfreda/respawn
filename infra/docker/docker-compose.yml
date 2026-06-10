@@ -14,6 +14,32 @@ services:
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-oss:120b}
       VISION_MODEL: ${VISION_MODEL:-moondream:latest}
       MODEL_CAPABILITIES: ${MODEL_CAPABILITIES:-gpt-oss:120b=text,file-text,reasoning,tools;moondream:latest=text,file-text,vision}
+      CONTEXT_WINDOW_DEFAULT_TOKENS: ${CONTEXT_WINDOW_DEFAULT_TOKENS:-131072}
+      MODEL_CONTEXT_WINDOWS: ${MODEL_CONTEXT_WINDOWS:-gpt-oss:120b=131072;gpt-oss-120b=131072;gpt-oss:20b=131072;gpt-oss-20b=131072;moondream:latest=4096}
+      CONTEXT_TOKEN_MARGIN: ${CONTEXT_TOKEN_MARGIN:-256}
+      WEB_SEARCH_ENABLED: ${WEB_SEARCH_ENABLED:-false}
+      WEB_SEARCH_BACKEND: ${WEB_SEARCH_BACKEND:-searxng}
+      WEB_SEARCH_BASE_URL: ${WEB_SEARCH_BASE_URL:-http://searxng:8080}
+      WEB_SEARCH_TIMEOUT_SECONDS: ${WEB_SEARCH_TIMEOUT_SECONDS:-10}
+      WEB_SEARCH_MAX_RESULTS: ${WEB_SEARCH_MAX_RESULTS:-5}
+      WEB_SEARCH_MAX_RESULT_CHARS: ${WEB_SEARCH_MAX_RESULT_CHARS:-12000}
+      WEB_SEARCH_CACHE_TTL_SECONDS: ${WEB_SEARCH_CACHE_TTL_SECONDS:-3600}
+      WEB_SEARCH_ALLOWED_DOMAINS: ${WEB_SEARCH_ALLOWED_DOMAINS:-}
+      WEB_SEARCH_BLOCKED_DOMAINS: ${WEB_SEARCH_BLOCKED_DOMAINS:-}
+      WEB_SEARCH_USER_AGENT: ${WEB_SEARCH_USER_AGENT:-RespawnWebSearch/1.0}
+      IMAGE_GENERATION_ENABLED: ${IMAGE_GENERATION_ENABLED:-false}
+      IMAGE_GENERATION_BACKEND: ${IMAGE_GENERATION_BACKEND:-comfyui}
+      IMAGE_GENERATION_BASE_URL: ${IMAGE_GENERATION_BASE_URL:-http://comfyui:8188}
+      IMAGE_GENERATION_MODEL: ${IMAGE_GENERATION_MODEL:-sd-v1-5.safetensors}
+      IMAGE_GENERATION_TIMEOUT_SECONDS: ${IMAGE_GENERATION_TIMEOUT_SECONDS:-180}
+      IMAGE_GENERATION_DEFAULT_SIZE: ${IMAGE_GENERATION_DEFAULT_SIZE:-512x512}
+      IMAGE_GENERATION_MAX_PIXELS: ${IMAGE_GENERATION_MAX_PIXELS:-1048576}
+      IMAGE_GENERATION_DEFAULT_STEPS: ${IMAGE_GENERATION_DEFAULT_STEPS:-8}
+      IMAGE_GENERATION_MAX_STEPS: ${IMAGE_GENERATION_MAX_STEPS:-30}
+      IMAGE_GENERATION_DEFAULT_CFG_SCALE: ${IMAGE_GENERATION_DEFAULT_CFG_SCALE:-7}
+      IMAGE_GENERATION_SAMPLER: ${IMAGE_GENERATION_SAMPLER:-Euler a}
+      IMAGE_GENERATION_NEGATIVE_PROMPT: ${IMAGE_GENERATION_NEGATIVE_PROMPT:-}
+      IMAGE_GENERATION_OUTPUT_FORMAT: ${IMAGE_GENERATION_OUTPUT_FORMAT:-png}
       AUTO_CREATE_TABLES: "false"
     ports:
       - "8080:8080"
@@ -114,6 +140,52 @@ services:
       timeout: 5s
       retries: 10
 
+  searxng:
+    image: searxng/searxng:latest
+    profiles:
+      - web-search
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://localhost:8081/}
+    ports:
+      - "${SEARXNG_PORT:-8081}:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+
+  comfyui:
+    build:
+      context: ../..
+      dockerfile: infra/docker/comfyui/Dockerfile
+      args:
+        COMFYUI_REPOSITORY: ${COMFYUI_REPOSITORY:-https://github.com/Comfy-Org/ComfyUI.git}
+        COMFYUI_REF: ${COMFYUI_REF:-master}
+    profiles:
+      - image-generation
+    environment:
+      COMFYUI_ARGS: ${COMFYUI_ARGS:---disable-api-nodes --disable-pinned-memory --force-fp16 --fp16-vae --fp16-text-enc --dont-upcast-attention}
+      COMFYUI_BASE_DIRECTORY: ${COMFYUI_BASE_DIRECTORY:-/data}
+      COMFYUI_DATABASE_URL: ${COMFYUI_DATABASE_URL:-}
+      COMFYUI_LISTEN: ${COMFYUI_LISTEN:-0.0.0.0}
+      COMFYUI_PORT: ${COMFYUI_PORT:-8188}
+    ports:
+      - "${COMFYUI_PORT_HOST:-8188}:8188"
+    volumes:
+      - ${COMFYUI_DATA_PATH:-comfyui-data}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8188/system_stats >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   victoria-metrics:
     image: victoriametrics/victoria-metrics:latest
     command:
@@ -151,5 +223,6 @@ services:
 
 volumes:
   ollama-data:
+  comfyui-data:
   victoria-metrics-data:
   grafana-data:

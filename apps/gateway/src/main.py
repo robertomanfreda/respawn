@@ -10,8 +10,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 
 from src import __version__
+from src.adapters.automatic1111_image import Automatic1111ImageGenerationBackend
+from src.adapters.comfyui_image import ComfyUIImageGenerationBackend
+from src.adapters.image_generation_base import ImageGenerationBackend
 from src.adapters.mock_backend import MockBackend
+from src.adapters.mock_image import MockImageGenerationBackend
+from src.adapters.mock_search import MockSearchBackend
 from src.adapters.ollama_backend import OllamaBackend
+from src.adapters.searxng_search import SearxngSearchBackend
 from src.api import chat, compatibility, files, health, metrics, models, prompt_templates, responses
 from src.config import get_settings
 from src.observability.logging import configure_logging
@@ -35,6 +41,8 @@ from src.storage import create_engine, create_sessionmaker, create_tables
 
 logger = logging.getLogger(__name__)
 SUPPORTED_MODEL_BACKENDS = {"mock", "ollama"}
+SUPPORTED_WEB_SEARCH_BACKENDS = {"mock", "searxng"}
+SUPPORTED_IMAGE_GENERATION_BACKENDS = {"mock", "automatic1111", "comfyui"}
 
 
 def build_backend(settings):
@@ -48,6 +56,46 @@ def build_backend(settings):
     raise ValueError(f"Unsupported MODEL_BACKEND '{settings.model_backend}'. Supported values: {supported}.")
 
 
+def build_web_search_backend(settings):
+    """Create the optional web search backend when local web search is enabled."""
+    if not settings.web_search_enabled:
+        return None
+    backend_name = settings.web_search_backend.lower()
+    if backend_name == "mock":
+        return MockSearchBackend()
+    if backend_name == "searxng":
+        return SearxngSearchBackend(
+            base_url=settings.web_search_base_url,
+            timeout_seconds=settings.web_search_timeout_seconds,
+            user_agent=settings.web_search_user_agent,
+        )
+    supported = ", ".join(sorted(SUPPORTED_WEB_SEARCH_BACKENDS))
+    raise ValueError(f"Unsupported WEB_SEARCH_BACKEND '{settings.web_search_backend}'. Supported values: {supported}.")
+
+
+def build_image_generation_backend(settings) -> ImageGenerationBackend | None:
+    """Create the optional image-generation backend when local image generation is enabled."""
+    if not settings.image_generation_enabled:
+        return None
+    backend_name = settings.image_generation_backend.lower()
+    if backend_name == "mock":
+        return MockImageGenerationBackend()
+    if backend_name == "automatic1111":
+        return Automatic1111ImageGenerationBackend(
+            base_url=settings.image_generation_base_url,
+            timeout_seconds=settings.image_generation_timeout_seconds,
+            model=settings.image_generation_model,
+        )
+    if backend_name == "comfyui":
+        return ComfyUIImageGenerationBackend(
+            base_url=settings.image_generation_base_url,
+            timeout_seconds=settings.image_generation_timeout_seconds,
+            model=settings.image_generation_model,
+        )
+    supported = ", ".join(sorted(SUPPORTED_IMAGE_GENERATION_BACKENDS))
+    raise ValueError(f"Unsupported IMAGE_GENERATION_BACKEND '{settings.image_generation_backend}'. Supported values: {supported}.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -56,6 +104,8 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.async_session = create_sessionmaker(engine)
     app.state.backend = build_backend(settings)
+    app.state.web_search_backend = build_web_search_backend(settings)
+    app.state.image_generation_backend = build_image_generation_backend(settings)
     app.state.background_tasks = {}
     app.state.idempotency_store = IdempotencyStore(settings.idempotency_cache_max_entries)
     app.state.prompt_cache = PromptCache(
@@ -75,6 +125,8 @@ async def lifespan(app: FastAPI):
         settings=settings,
         session_factory=app.state.async_session,
         backend=app.state.backend,
+        web_search_backend=app.state.web_search_backend,
+        image_generation_backend=app.state.image_generation_backend,
         prompt_cache=app.state.prompt_cache,
         background_tasks=app.state.background_tasks,
     )

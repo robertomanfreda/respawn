@@ -29,6 +29,8 @@ async def readyz(request: Request):
         "worker": await _run_check("worker", lambda: _check_worker(request)),
         "cache": await _run_check("cache", lambda: _check_cache(request)),
         "storage": await _run_check("storage", lambda: _check_storage(settings)),
+        "web_search": await _run_check("web_search", lambda: _check_web_search(request)),
+        "image_generation": await _run_check("image_generation", lambda: _check_image_generation(request)),
     }
     ready = all(check["status"] == "ready" for check in checks.values())
     content = {
@@ -106,3 +108,27 @@ async def _check_storage(settings) -> dict[str, Any]:
             raise RuntimeError("File storage path is not a directory.")
         return {"backend": backend, "path": str(path)}
     return {"backend": backend}
+
+
+async def _check_web_search(request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    if not settings.web_search_enabled:
+        return {"enabled": False}
+    backend = getattr(request.app.state, "web_search_backend", None)
+    if backend is None:
+        raise RuntimeError("Web search backend is not configured.")
+    timeout = min(max(float(settings.web_search_timeout_seconds), 0.1), 5.0)
+    details = await asyncio.wait_for(backend.check_ready(), timeout=timeout)
+    return {"enabled": True, **details}
+
+
+async def _check_image_generation(request: Request) -> dict[str, Any]:
+    settings = request.app.state.settings
+    if not settings.image_generation_enabled:
+        return {"enabled": False}
+    backend = getattr(request.app.state, "image_generation_backend", None)
+    if backend is None:
+        raise RuntimeError("Image generation backend is not configured.")
+    timeout = min(max(float(settings.image_generation_timeout_seconds), 0.1), 5.0)
+    details = await asyncio.wait_for(backend.check_ready(), timeout=timeout)
+    return {"enabled": True, **details}

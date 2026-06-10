@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.adapters.base import ChatCompletionResult, ModelBackend
+from src.adapters.image_generation_base import ImageGenerationBackend
+from src.adapters.web_search_base import WebSearchBackend
 from src.config import Settings
 from src.observability.metrics import (
     BACKGROUND_JOB_LATENCY,
@@ -42,12 +44,14 @@ from src.schemas.responses import ResponseArtifactList, ResponseCompactionObject
 from src.services.context_management import ContextPlan, ContextPlanner, compact_response_window
 from src.services.include_expansions import (
     OUTPUT_TEXT_LOGPROBS,
+    WEB_SEARCH_ACTION_SOURCES,
     input_image_url_requested,
     logprobs_requested,
     requested_includes,
     validate_include_capabilities,
     validate_include_values,
 )
+from src.services.image_generation import ImageGenerationExecution, ImageGenerationService, validate_image_generation_configuration
 from src.services.response_history_builder import (
     assistant_text_to_output,
     build_messages,
@@ -62,6 +66,7 @@ from src.services.responses_compat import (
     estimate_text_tokens,
     backend_function_tools,
     backend_tool_choice,
+    function_call_output_name,
     function_call_output_ids,
     input_items_from_request,
     normalized_text_config,
@@ -70,15 +75,20 @@ from src.services.responses_compat import (
     reasoning_output_item,
     reasoning_requested,
     response_output_text,
+    is_internal_image_generation_tool_call,
+    is_internal_web_search_tool_call,
     stream_obfuscation_enabled,
     tool_choice_instruction,
     validate_function_call_outputs_match,
     validate_reasoning_capabilities,
     validate_text_responses_request,
+    image_generation_requested,
+    web_search_requested,
 )
 from src.services.reasoning_encryption import seal_reasoning_content
 from src.services.reasoning_summaries import DeterministicReasoningSummaryProvider
 from src.services.usage_meter import enrich_response_usage, normalize_usage
+from src.services.web_search import WebSearchExecution, WebSearchService, url_citation_annotations, validate_web_search_configuration
 from src.storage.repository import ResponseRepository
 from src.streaming.events import make_event
 
@@ -93,12 +103,16 @@ class ResponseService:
         repository: ResponseRepository,
         backend: ModelBackend,
         prompt_cache: PromptCache,
+        web_search_backend: WebSearchBackend | None = None,
+        image_generation_backend: ImageGenerationBackend | None = None,
         session_factory: Any | None = None,
         background_tasks: dict[str, asyncio.Task] | None = None,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.backend = backend
+        self.web_search_backend = web_search_backend
+        self.image_generation_backend = image_generation_backend
         self.prompt_cache = prompt_cache
         self.session_factory = session_factory
         self.background_tasks = background_tasks
@@ -114,6 +128,8 @@ class ResponseService:
         validate_include_capabilities(request, model=model, settings=self.settings)
         validate_reasoning_capabilities(request, model=model, settings=self.settings)
         request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
+        self._validate_web_search_request(request)
+        self._validate_image_generation_request(request)
         if request.background:
             return await self.create_background(request, tenant_id)
         response_id = generate_id("resp")
@@ -175,6 +191,8 @@ class ResponseService:
     async def create_background(self, request: ResponseRequest, tenant_id: str | None) -> ResponseObject:
         model = request.model or self.settings.default_model
         validate_include_capabilities(request, model=model, settings=self.settings)
+        self._validate_web_search_request(request)
+        self._validate_image_generation_request(request)
         response_id = generate_id("resp")
         request = self._stamp_input_artifacts(request, response_id=response_id)
         should_store = self._should_store(request)
@@ -328,6 +346,8 @@ class ResponseService:
         validate_include_capabilities(request, model=model, settings=self.settings)
         validate_reasoning_capabilities(request, model=model, settings=self.settings)
         request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
+        self._validate_web_search_request(request)
+        self._validate_image_generation_request(request)
         response_id = generate_id("resp")
         request = self._stamp_input_artifacts(request, response_id=response_id)
         created_at = int(time.time())
@@ -380,9 +400,8 @@ class ResponseService:
             if submitted_tool_outputs:
                 FUNCTION_TOOL_OUTPUTS.labels(model=model).inc(len(submitted_tool_outputs))
             plan = await self._plan_context(model=model, request=request, chain=chain, response_id=response_id, should_store=should_store, mode=mode)
-            payload = self._payload(model=model, request=plan.request, chain=plan.chain)
-            cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-            self._record_prompt_cache_metrics(cache_match)
+            web_search = await self._web_search_service().execute_if_needed(plan.request, response_id=response_id)
+            image_generation = await self._image_generation_service().execute_if_needed(plan.request, response_id=response_id)
             output_index = 0
             emitted_items: list[tuple[int, dict[str, Any]]] = []
             if plan.compaction_item is not None:
@@ -400,10 +419,67 @@ class ResponseService:
                 emitted_items.append((output_index, compaction_item))
                 output_index += 1
             reasoning_id: str | None = None
+            reasoning_output_index: int | None = None
             finish_reason: str | None = None
+            streamed_backend_tool_calls: list[dict[str, Any]] = []
+            internal_web_searches: list[WebSearchExecution] = []
             yield event("response.in_progress", {"response": in_progress_response})
+            if web_search is not None:
+                current_output_index = output_index
+                public_web_search_item = self._response_web_search_item(web_search.output_item, request.include)
+                if should_store:
+                    await self.repository.create_output_item(
+                        response_id=response_id,
+                        output_index=current_output_index,
+                        item=web_search.output_item,
+                    )
+                yield event(
+                    "response.output_item.added",
+                    {
+                        "output_index": current_output_index,
+                        "item": public_web_search_item,
+                    },
+                )
+                yield event("response.output_item.done", {"output_index": current_output_index, "item": public_web_search_item})
+                emitted_items.append((current_output_index, web_search.output_item))
+                output_index += 1
+            if image_generation is not None:
+                current_output_index = output_index
+                if should_store:
+                    await self.repository.create_output_item(
+                        response_id=response_id,
+                        output_index=current_output_index,
+                        item=image_generation.output_item,
+                    )
+                yield event(
+                    "response.output_item.added",
+                    {
+                        "output_index": current_output_index,
+                        "item": image_generation.output_item,
+                    },
+                )
+                yield event("response.output_item.done", {"output_index": current_output_index, "item": image_generation.output_item})
+                emitted_items.append((current_output_index, image_generation.output_item))
+                output = [item for _, item in sorted(emitted_items, key=lambda pair: pair[0])]
+                input_tokens = estimate_input_tokens(plan.request, plan.chain)
+                usage = ResponseUsage(input_tokens=input_tokens, output_tokens=0, total_tokens=input_tokens)
+                response_status = "completed"
+                if should_store:
+                    await self.repository.complete_response(response_id, output, usage.model_dump(), status=response_status)
+                    await self.repository.session.commit()
+                completed = self._response_object(response_id, model, response_status, output, usage, request.metadata, request=request, should_store=should_store, created_at=created_at).model_dump()
+                status = response_status
+                if request.tools:
+                    FUNCTION_TOOL_REQUESTS.labels(model=model, status=response_status).inc()
+                yield event("response.completed", {"response": completed})
+                return
+            payload = self._payload(model=model, request=plan.request, chain=plan.chain)
+            self._inject_web_search_context(payload, web_search)
+            cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+            self._record_prompt_cache_metrics(cache_match)
             if reasoning_requested(request):
                 reasoning_id = generate_id("rs")
+                reasoning_output_index = output_index
                 if should_store:
                     await self.repository.create_output_item(
                         response_id=response_id,
@@ -465,7 +541,49 @@ class ResponseService:
                         ),
                     )
                 elif chunk.get("type") == "tool_calls":
-                    for item in self._function_call_output_items(chunk.get("tool_calls") or [], request):
+                    tool_calls = chunk.get("tool_calls") or []
+                    streamed_backend_tool_calls.extend(tool_calls)
+                    for web_search_execution in await self._execute_internal_web_search_tool_calls(tool_calls, plan.request, response_id=response_id):
+                        internal_web_searches.append(web_search_execution)
+                        current_output_index = output_index
+                        public_web_search_item = self._response_web_search_item(web_search_execution.output_item, request.include)
+                        if should_store:
+                            await self.repository.create_output_item(
+                                response_id=response_id,
+                                output_index=current_output_index,
+                                item=web_search_execution.output_item,
+                            )
+                        yield event(
+                            "response.output_item.added",
+                            {
+                                "response_id": response_id,
+                                "output_index": current_output_index,
+                                "item": public_web_search_item,
+                            },
+                        )
+                        yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": public_web_search_item})
+                        emitted_items.append((current_output_index, web_search_execution.output_item))
+                        output_index += 1
+                    for image_generation_execution in await self._execute_internal_image_generation_tool_calls(tool_calls, plan.request, response_id=response_id):
+                        current_output_index = output_index
+                        if should_store:
+                            await self.repository.create_output_item(
+                                response_id=response_id,
+                                output_index=current_output_index,
+                                item=image_generation_execution.output_item,
+                            )
+                        yield event(
+                            "response.output_item.added",
+                            {
+                                "response_id": response_id,
+                                "output_index": current_output_index,
+                                "item": image_generation_execution.output_item,
+                            },
+                        )
+                        yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": image_generation_execution.output_item})
+                        emitted_items.append((current_output_index, image_generation_execution.output_item))
+                        output_index += 1
+                    for item in self._function_call_output_items(tool_calls, request):
                         current_output_index = output_index
                         added_item = {**item, "arguments": "", "status": "in_progress"}
                         if should_store:
@@ -505,9 +623,127 @@ class ResponseService:
                 elif chunk.get("type") == "done":
                     usage = normalize_usage(chunk.get("usage"))
                     finish_reason = chunk.get("finish_reason")
+            if internal_web_searches:
+                self._validate_tool_result(ChatCompletionResult(content=output_text, reasoning=reasoning_text, finish_reason=finish_reason, tool_calls=streamed_backend_tool_calls), request, model)
+                self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+                followup_payload = self._payload(model=model, request=plan.request, chain=plan.chain)
+                self._inject_web_search_contexts(followup_payload, [search for search in ([web_search] if web_search is not None else []) + internal_web_searches])
+                self._remove_internal_web_search_tool(followup_payload)
+                cache_match = self.prompt_cache.inspect(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+                self._record_prompt_cache_metrics(cache_match)
+                payload = followup_payload
+                streamed_backend_tool_calls = []
+                finish_reason = None
+                async for chunk in self.backend.create_chat_completion_stream(payload):
+                    if chunk.get("type") == "reasoning_delta":
+                        reasoning_text += chunk.get("delta", "")
+                    elif chunk.get("type") == "delta":
+                        delta = chunk.get("delta", "")
+                        if output_id is None:
+                            output_id = generate_id("msg")
+                            text_output_index = output_index
+                            if should_store:
+                                await self.repository.create_output_item(
+                                    response_id=response_id,
+                                    output_index=text_output_index,
+                                    item={"id": output_id, "type": "message", "role": "assistant", "status": "in_progress", "content": []},
+                                )
+                            yield event(
+                                "response.output_item.added",
+                                {
+                                    "output_index": text_output_index,
+                                    "item": {"id": output_id, "type": "message", "role": "assistant", "status": "in_progress", "content": []},
+                                },
+                            )
+                            yield event(
+                                "response.content_part.added",
+                                {
+                                    "item_id": output_id,
+                                    "output_index": text_output_index,
+                                    "content_index": 0,
+                                    "part": {"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                                },
+                            )
+                            output_index += 1
+                        output_text += delta
+                        yield event(
+                            "response.output_text.delta",
+                            delta_event_data(
+                                {
+                                    "item_id": output_id,
+                                    "output_index": text_output_index,
+                                    "content_index": 0,
+                                    "delta": delta,
+                                    "logprobs": [],
+                                }
+                            ),
+                        )
+                    elif chunk.get("type") == "tool_calls":
+                        tool_calls = chunk.get("tool_calls") or []
+                        streamed_backend_tool_calls.extend(tool_calls)
+                        for image_generation_execution in await self._execute_internal_image_generation_tool_calls(tool_calls, plan.request, response_id=response_id):
+                            current_output_index = output_index
+                            if should_store:
+                                await self.repository.create_output_item(
+                                    response_id=response_id,
+                                    output_index=current_output_index,
+                                    item=image_generation_execution.output_item,
+                                )
+                            yield event(
+                                "response.output_item.added",
+                                {
+                                    "response_id": response_id,
+                                    "output_index": current_output_index,
+                                    "item": image_generation_execution.output_item,
+                                },
+                            )
+                            yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": image_generation_execution.output_item})
+                            emitted_items.append((current_output_index, image_generation_execution.output_item))
+                            output_index += 1
+                        for item in self._function_call_output_items(tool_calls, request):
+                            current_output_index = output_index
+                            added_item = {**item, "arguments": "", "status": "in_progress"}
+                            if should_store:
+                                await self.repository.create_output_item(
+                                    response_id=response_id,
+                                    output_index=current_output_index,
+                                    item=added_item,
+                                )
+                            yield event(
+                                "response.output_item.added",
+                                {"response_id": response_id, "output_index": current_output_index, "item": added_item},
+                            )
+                            if item["arguments"]:
+                                yield event(
+                                    "response.function_call_arguments.delta",
+                                    delta_event_data(
+                                        {
+                                            "response_id": response_id,
+                                            "item_id": item["id"],
+                                            "output_index": current_output_index,
+                                            "delta": item["arguments"],
+                                        }
+                                    ),
+                                )
+                            yield event(
+                                "response.function_call_arguments.done",
+                                {
+                                    "response_id": response_id,
+                                    "item_id": item["id"],
+                                    "output_index": current_output_index,
+                                    "arguments": item["arguments"],
+                                },
+                            )
+                            yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": item})
+                            emitted_items.append((current_output_index, item))
+                            output_index += 1
+                    elif chunk.get("type") == "done":
+                        usage = normalize_usage(chunk.get("usage"))
+                        finish_reason = chunk.get("finish_reason")
+            self._validate_tool_result(ChatCompletionResult(content=output_text, reasoning=reasoning_text, finish_reason=finish_reason, tool_calls=streamed_backend_tool_calls), request, model)
             streamed_tool_calls = [self._backend_tool_call_from_item(item) for _, item in emitted_items if item.get("type") == "function_call"]
-            self._validate_tool_result(ChatCompletionResult(content=output_text, reasoning=reasoning_text, finish_reason=finish_reason, tool_calls=streamed_tool_calls), request, model)
-            if output_text or not streamed_tool_calls:
+            generated_image_items = [item for _, item in emitted_items if item.get("type") == "image_generation_call"]
+            if output_text or (not streamed_tool_calls and not generated_image_items):
                 validate_text_against_schema(output_text, schema_from_response_format(self._structured_format(request)))
             usage = enrich_response_usage(
                 usage,
@@ -515,29 +751,30 @@ class ResponseService:
                 reasoning_tokens=self._reasoning_tokens(reasoning_text, usage),
                 minimum_output_tokens=estimate_text_tokens(output_text),
             )
-            output = []
+            reasoning_pair: tuple[int, dict[str, Any]] | None = None
             if reasoning_id is not None:
                 reasoning_item = self._reasoning_output_item(reasoning_id, reasoning_text, request, response_id=response_id)
-                output.append(reasoning_item)
+                reasoning_pair = (reasoning_output_index or 0, reasoning_item)
                 if reasoning_item["summary"]:
                     summary_part = reasoning_item["summary"][0]
+                    current_reasoning_index = reasoning_output_index or 0
                     yield event(
                         "response.reasoning_summary_part.added",
-                        {"item_id": reasoning_id, "output_index": 0, "summary_index": 0, "part": {"type": "summary_text", "text": ""}},
+                        {"item_id": reasoning_id, "output_index": current_reasoning_index, "summary_index": 0, "part": {"type": "summary_text", "text": ""}},
                     )
                     yield event(
                         "response.reasoning_summary_text.delta",
-                        delta_event_data({"item_id": reasoning_id, "output_index": 0, "summary_index": 0, "delta": summary_part["text"]}),
+                        delta_event_data({"item_id": reasoning_id, "output_index": current_reasoning_index, "summary_index": 0, "delta": summary_part["text"]}),
                     )
                     yield event(
                         "response.reasoning_summary_text.done",
-                        {"item_id": reasoning_id, "output_index": 0, "summary_index": 0, "text": summary_part["text"]},
+                        {"item_id": reasoning_id, "output_index": current_reasoning_index, "summary_index": 0, "text": summary_part["text"]},
                     )
                     yield event(
                         "response.reasoning_summary_part.done",
-                        {"item_id": reasoning_id, "output_index": 0, "summary_index": 0, "part": summary_part},
+                        {"item_id": reasoning_id, "output_index": current_reasoning_index, "summary_index": 0, "part": summary_part},
                     )
-                yield event("response.output_item.done", {"output_index": 0, "item": reasoning_item})
+                yield event("response.output_item.done", {"output_index": reasoning_output_index or 0, "item": reasoning_item})
             if output_id is None and not emitted_items:
                 output_id = generate_id("msg")
                 text_output_index = output_index
@@ -564,8 +801,11 @@ class ResponseService:
                     },
                 )
             if output_id is not None and text_output_index is not None:
-                emitted_items.append((text_output_index, assistant_text_to_output(output_id, output_text, annotations=self._output_annotations(request))))
-            output.extend(item for _, item in sorted(emitted_items, key=lambda pair: pair[0]))
+                final_annotations = self._output_annotations(request, web_search=web_search, web_searches=internal_web_searches, output_text=output_text)
+                emitted_items.append((text_output_index, assistant_text_to_output(output_id, output_text, annotations=final_annotations)))
+            if reasoning_pair is not None:
+                emitted_items.append(reasoning_pair)
+            output = [item for _, item in sorted(emitted_items, key=lambda pair: pair[0])]
             self._record_token_usage(model, usage)
             response_status, incomplete_details = self._completion_status(finish_reason)
             self._record_reasoning_metrics(model=model, request=request, usage=usage, status=response_status)
@@ -577,6 +817,7 @@ class ResponseService:
                 await self.repository.session.commit()
             text_item = next((item for item in output if item.get("id") == output_id and item.get("type") == "message"), None)
             if text_item is not None and text_output_index is not None:
+                final_annotations = self._output_annotations(request, web_search=web_search, web_searches=internal_web_searches, output_text=output_text)
                 yield event(
                     "response.output_text.done",
                     {"item_id": output_id, "output_index": text_output_index, "content_index": 0, "text": output_text, "logprobs": []},
@@ -587,7 +828,7 @@ class ResponseService:
                         "item_id": output_id,
                         "output_index": text_output_index,
                         "content_index": 0,
-                        "part": {"type": "output_text", "text": output_text, "annotations": self._output_annotations(request), "logprobs": []},
+                        "part": {"type": "output_text", "text": output_text, "annotations": final_annotations, "logprobs": []},
                     },
                 )
                 yield event("response.output_item.done", {"output_index": text_output_index, "item": text_item})
@@ -676,6 +917,8 @@ class ResponseService:
         model = request.model or self.settings.default_model
         validate_reasoning_capabilities(request, model=model, settings=self.settings)
         request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
+        self._validate_web_search_request(request)
+        self._validate_image_generation_request(request)
         chain = await self.repository.load_chain(request.previous_response_id, tenant_id, self.settings.max_chain_depth)
         validate_function_call_outputs_match(chain, request.input)
         payload = self._payload(model=model, request=request, chain=chain)
@@ -693,6 +936,8 @@ class ResponseService:
         model = request.model or self.settings.default_model
         validate_reasoning_capabilities(request, model=model, settings=self.settings)
         request = await prepare_multimodal_request(request, model=model, settings=self.settings, repository=self.repository, tenant_id=tenant_id)
+        self._validate_web_search_request(request)
+        self._validate_image_generation_request(request)
         response_id = generate_id("resp")
         output, after_request, summary, before, after = compact_response_window(input_value=request.input, model=model, settings=self.settings)
         usage = ResponseUsage(input_tokens=before, output_tokens=after, total_tokens=before + after)
@@ -730,15 +975,54 @@ class ResponseService:
         if submitted_tool_outputs:
             FUNCTION_TOOL_OUTPUTS.labels(model=model).inc(len(submitted_tool_outputs))
         plan = await self._plan_context(model=model, request=request, chain=chain, response_id=response_id, should_store=should_store, mode="create")
+        web_search = await self._web_search_service().execute_if_needed(plan.request, response_id=response_id)
+        web_searches = [web_search] if web_search is not None else []
+        image_generation = await self._image_generation_service().execute_if_needed(plan.request, response_id=response_id)
+        if image_generation is not None:
+            input_tokens = estimate_input_tokens(plan.request, plan.chain)
+            usage = ResponseUsage(input_tokens=input_tokens, output_tokens=0, total_tokens=input_tokens)
+            output: list[dict[str, Any]] = []
+            if web_search is not None:
+                output.append(web_search.output_item)
+            output.append(image_generation.output_item)
+            if plan.compaction_item is not None:
+                output.insert(0, {**plan.compaction_item, "status": "completed"})
+            return output, usage, "completed", None
         payload = self._payload(model=model, request=plan.request, chain=plan.chain)
+        self._inject_web_search_context(payload, web_search)
         cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
         self._record_prompt_cache_metrics(cache_match)
         result = await self._run_with_structured_repair(response_id=response_id, payload=payload, request=plan.request, should_store=should_store)
         self._validate_logprobs_result(result, request, model)
         self._validate_tool_result(result, request, model)
+        internal_web_searches = await self._execute_internal_web_search_tool_calls(result.tool_calls, plan.request, response_id=response_id)
+        if internal_web_searches:
+            web_searches.extend(internal_web_searches)
+            self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+            first_usage = self._usage(result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)}), cache_match)
+            followup_payload = self._payload(model=model, request=plan.request, chain=plan.chain)
+            self._inject_web_search_contexts(followup_payload, web_searches)
+            self._remove_internal_web_search_tool(followup_payload)
+            followup_cache_match = self.prompt_cache.inspect(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+            self._record_prompt_cache_metrics(followup_cache_match)
+            result = await self._run_with_structured_repair(response_id=response_id, payload=followup_payload, request=plan.request, should_store=should_store)
+            self._validate_logprobs_result(result, request, model)
+            self._validate_tool_result(result, request, model)
+            image_generations = await self._execute_internal_image_generation_tool_calls(result.tool_calls, plan.request, response_id=response_id)
+            result = result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)})
+            usage = _combine_usage(first_usage, self._usage(result, followup_cache_match))
+            response_status, incomplete_details = self._completion_status(result.finish_reason)
+            output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches, image_generations=image_generations)
+            if plan.compaction_item is not None:
+                output.insert(0, {**plan.compaction_item, "status": "completed"})
+            self._record_token_usage(model, usage)
+            self.prompt_cache.store(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
+            return output, usage, response_status, incomplete_details
+        image_generations = await self._execute_internal_image_generation_tool_calls(result.tool_calls, plan.request, response_id=response_id)
+        result = result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)})
         usage = self._usage(result, cache_match)
         response_status, incomplete_details = self._completion_status(result.finish_reason)
-        output = self._output_items(result, request, response_id=response_id, response_status=response_status)
+        output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches, image_generations=image_generations)
         if plan.compaction_item is not None:
             output.insert(0, {**plan.compaction_item, "status": "completed"})
         self._record_token_usage(model, usage)
@@ -820,6 +1104,8 @@ class ResponseService:
             session_factory=self.session_factory,
             backend=self.backend,
             prompt_cache=self.prompt_cache,
+            web_search_backend=self.web_search_backend,
+            image_generation_backend=self.image_generation_backend,
             background_tasks=self.background_tasks,
             response_id=response_id,
             tenant_id=tenant_id,
@@ -859,6 +1145,10 @@ class ResponseService:
         if tools:
             payload["tools"] = tools
         tool_choice = backend_tool_choice(request)
+        if tool_choice == "required" and web_search_requested(request):
+            tool_choice = "auto" if tools else None
+        elif tool_choice == "required" and not tools:
+            tool_choice = None
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
         if request.parallel_tool_calls is not None:
@@ -872,20 +1162,41 @@ class ResponseService:
             payload["reasoning"] = request.reasoning
         if request.top_logprobs is not None or OUTPUT_TEXT_LOGPROBS in requested_includes(request):
             payload["top_logprobs"] = request.top_logprobs or 0
+        if self.settings.model_backend.lower() == "mock" and request.metadata:
+            payload["metadata"] = dict(request.metadata)
         return {k: v for k, v in payload.items() if v is not None}
 
-    def _output_items(self, result: ChatCompletionResult, request: ResponseRequest, *, response_id: str, response_status: str = "completed") -> list[dict[str, Any]]:
+    def _output_items(
+        self,
+        result: ChatCompletionResult,
+        request: ResponseRequest,
+        *,
+        response_id: str,
+        response_status: str = "completed",
+        web_search: WebSearchExecution | None = None,
+        web_searches: list[WebSearchExecution] | None = None,
+        image_generation: ImageGenerationExecution | None = None,
+        image_generations: list[ImageGenerationExecution] | None = None,
+    ) -> list[dict[str, Any]]:
         output = [*result.output_items]
         if reasoning_requested(request):
             item_id = generate_id("rs")
             output.insert(0, self._reasoning_output_item(item_id, result.reasoning, request, response_id=response_id))
+        if web_search is not None:
+            output.append(web_search.output_item)
+        for search in web_searches or []:
+            output.append(search.output_item)
+        if image_generation is not None:
+            output.append(image_generation.output_item)
+        for generated_image in image_generations or []:
+            output.append(generated_image.output_item)
         function_calls = self._function_call_output_items(result.tool_calls, request)
         output.extend(function_calls)
-        if result.content or not function_calls:
+        if result.content or (not function_calls and image_generation is None and not image_generations):
             item = assistant_text_to_output(
                 generate_id("msg"),
                 result.content,
-                annotations=self._output_annotations(request),
+                annotations=self._output_annotations(request, web_search=web_search, web_searches=web_searches, output_text=result.content),
                 logprobs=result.content_logprobs,
             )
             if response_status == "incomplete":
@@ -895,26 +1206,46 @@ class ResponseService:
 
     def _function_call_output_items(self, tool_calls: list[dict[str, Any]], request: ResponseRequest) -> list[dict[str, Any]]:
         items = []
-        for call in tool_calls:
+        for call in self._public_tool_calls(tool_calls):
             function = dict(call.get("function") or {})
             call_id = str(call.get("id") or generate_id("call"))
+            resolved_name = function_call_output_name(str(function.get("name") or ""), request)
             item = {
                 "id": generate_id("fc"),
                 "type": "function_call",
                 "status": "completed",
                 "call_id": call_id,
-                "name": str(function.get("name") or ""),
+                "name": resolved_name["name"],
                 "arguments": self._arguments_to_string(function.get("arguments", "{}")),
             }
+            if resolved_name.get("namespace") is not None:
+                item["namespace"] = resolved_name["namespace"]
             items.append(item)
         return items
+
+    async def _execute_internal_image_generation_tool_calls(self, tool_calls: list[dict[str, Any]], request: ResponseRequest, *, response_id: str) -> list[ImageGenerationExecution]:
+        executions: list[ImageGenerationExecution] = []
+        for call in tool_calls:
+            if is_internal_image_generation_tool_call(call):
+                executions.append(await self._image_generation_service().execute_tool_call(call, request, response_id=response_id))
+        return executions
+
+    async def _execute_internal_web_search_tool_calls(self, tool_calls: list[dict[str, Any]], request: ResponseRequest, *, response_id: str) -> list[WebSearchExecution]:
+        executions: list[WebSearchExecution] = []
+        for call in tool_calls:
+            if is_internal_web_search_tool_call(call):
+                executions.append(await self._web_search_service().execute_tool_call(call, request, response_id=response_id))
+        return executions
+
+    def _public_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [call for call in tool_calls if not is_internal_image_generation_tool_call(call) and not is_internal_web_search_tool_call(call)]
 
     def _backend_tool_call_from_item(self, item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": item["call_id"],
             "type": "function",
             "function": {
-                "name": item["name"],
+                "name": self._backend_function_name(item),
                 "arguments": item["arguments"],
             },
         }
@@ -951,6 +1282,8 @@ class ResponseService:
     def _tool_choice_requires_output(self, request: ResponseRequest) -> bool:
         tool_choice = request.tool_choice
         if tool_choice == "required":
+            if web_search_requested(request):
+                return False
             return True
         if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
             return True
@@ -963,7 +1296,14 @@ class ResponseService:
         if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
             return None
         function = tool_choice.get("function") if isinstance(tool_choice.get("function"), dict) else {}
-        return str(tool_choice.get("name") or function.get("name") or "")
+        name = str(tool_choice.get("name") or function.get("name") or "")
+        namespace = tool_choice.get("namespace") or function.get("namespace")
+        return f"{namespace}{name}" if namespace is not None else name
+
+    def _backend_function_name(self, item: dict[str, Any]) -> str:
+        namespace = item.get("namespace")
+        name = str(item.get("name") or "")
+        return f"{namespace}{name}" if namespace is not None else name
 
     def _tool_capability_error(self, model: str, reason: str, message: str) -> None:
         FUNCTION_TOOL_CAPABILITY_ERRORS.labels(model=model, reason=reason).inc()
@@ -1006,6 +1346,7 @@ class ResponseService:
             {"role": "assistant", "content": result.content},
             {"role": "system", "content": repair_instruction(schema)},
         ]
+        repair_payload["_respawn_repair_attempt"] = True
         repaired = await self.backend.create_chat_completion(repair_payload)
         validate_text_against_schema(repaired.content, schema)
         return repaired
@@ -1218,6 +1559,8 @@ class ResponseService:
         serialized = []
         for item in output or []:
             next_item = dict(item)
+            if next_item.get("type") == "web_search_call":
+                next_item = self._response_web_search_item(next_item, include)
             content = next_item.get("content")
             if isinstance(content, list):
                 next_content = []
@@ -1232,6 +1575,17 @@ class ResponseService:
                 next_item["content"] = next_content
             serialized.append(next_item)
         return serialized
+
+    def _response_web_search_item(self, item: dict[str, Any], include: list[str]) -> dict[str, Any]:
+        next_item = {key: value for key, value in item.items() if not key.startswith("_respawn_")}
+        action = dict(next_item.get("action") or {})
+        sources = action.pop("_respawn_sources", [])
+        if WEB_SEARCH_ACTION_SOURCES in set(include):
+            action["sources"] = sources
+        else:
+            action.pop("sources", None)
+        next_item["action"] = {key: value for key, value in action.items() if not key.startswith("_respawn_")}
+        return next_item
 
     def _enforce_include_payload_limit(self, include: list[str], *, input_value: Any, output: list[dict[str, Any]]) -> None:
         if not include:
@@ -1277,7 +1631,7 @@ class ResponseService:
             artifact_id = generate_id("art")
         return {**part, "_respawn_artifact_id": artifact_id, "_respawn_response_id": response_id}
 
-    def _output_annotations(self, request: ResponseRequest) -> list[dict[str, Any]]:
+    def _output_annotations(self, request: ResponseRequest, *, web_search: WebSearchExecution | None = None, web_searches: list[WebSearchExecution] | None = None, output_text: str = "") -> list[dict[str, Any]]:
         annotations: list[dict[str, Any]] = []
         for index, part in enumerate(self._input_file_parts(request.input)):
             artifact_id = part.get("_respawn_artifact_id")
@@ -1291,7 +1645,52 @@ class ResponseService:
                     "index": index,
                 }
             )
+        search_executions = []
+        if web_search is not None:
+            search_executions.append(web_search)
+        search_executions.extend(web_searches or [])
+        search_results = [result for search in search_executions for result in search.run.results]
+        if search_results:
+            annotations.extend(url_citation_annotations(output_text, search_results))
         return annotations
+
+    def _web_search_service(self) -> WebSearchService:
+        return WebSearchService(settings=self.settings, backend=self.web_search_backend)
+
+    def _validate_web_search_request(self, request: ResponseRequest) -> None:
+        validate_web_search_configuration(request, settings=self.settings, backend=self.web_search_backend)
+
+    def _image_generation_service(self) -> ImageGenerationService:
+        return ImageGenerationService(settings=self.settings, backend=self.image_generation_backend)
+
+    def _validate_image_generation_request(self, request: ResponseRequest) -> None:
+        validate_image_generation_configuration(request, settings=self.settings, backend=self.image_generation_backend)
+
+    def _inject_web_search_context(self, payload: dict[str, Any], web_search: WebSearchExecution | None) -> None:
+        if web_search is None:
+            return
+        self._inject_web_search_contexts(payload, [web_search])
+
+    def _inject_web_search_contexts(self, payload: dict[str, Any], web_searches: list[WebSearchExecution]) -> None:
+        if not web_searches:
+            return
+        messages = payload.setdefault("messages", [])
+        if isinstance(messages, list):
+            insert_at = 1 if messages and messages[0].get("role") == "system" and str(messages[0].get("content", "")).startswith("You must") else 0
+            context = "\n\n".join(search.context for search in web_searches)
+            messages.insert(insert_at, {"role": "system", "content": context})
+
+    def _remove_internal_web_search_tool(self, payload: dict[str, Any]) -> None:
+        tools = payload.get("tools")
+        if not isinstance(tools, list):
+            return
+        public_tools = [tool for tool in tools if not is_internal_web_search_tool_call(tool)]
+        if public_tools:
+            payload["tools"] = public_tools
+            return
+        payload.pop("tools", None)
+        if payload.get("tool_choice") in {"auto", "required"}:
+            payload.pop("tool_choice", None)
 
     def _input_file_parts(self, input_value: Any) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
@@ -1455,6 +1854,17 @@ def _error_json(exc: Exception) -> dict[str, Any]:
     return {"message": str(exc), "type": "server_error", "param": None, "code": "internal_error"}
 
 
+def _combine_usage(*items: ResponseUsage) -> ResponseUsage:
+    usage = ResponseUsage()
+    for item in items:
+        usage.input_tokens += item.input_tokens
+        usage.input_tokens_details.cached_tokens += item.input_tokens_details.cached_tokens
+        usage.output_tokens += item.output_tokens
+        usage.output_tokens_details.reasoning_tokens += item.output_tokens_details.reasoning_tokens
+        usage.total_tokens += item.total_tokens
+    return usage
+
+
 def _public_artifact(artifact: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
     public = {
         "id": artifact.get("id"),
@@ -1496,6 +1906,8 @@ def schedule_background_response(
     session_factory: Any,
     backend: ModelBackend,
     prompt_cache: PromptCache,
+    web_search_backend: WebSearchBackend | None,
+    image_generation_backend: ImageGenerationBackend | None,
     background_tasks: dict[str, asyncio.Task],
     response_id: str,
     tenant_id: str | None,
@@ -1509,6 +1921,8 @@ def schedule_background_response(
             session_factory=session_factory,
             backend=backend,
             prompt_cache=prompt_cache,
+            web_search_backend=web_search_backend,
+            image_generation_backend=image_generation_backend,
             background_tasks=background_tasks,
             response_id=response_id,
             tenant_id=tenant_id,
@@ -1524,6 +1938,8 @@ async def resume_background_responses(
     session_factory: Any,
     backend: ModelBackend,
     prompt_cache: PromptCache,
+    web_search_backend: WebSearchBackend | None,
+    image_generation_backend: ImageGenerationBackend | None,
     background_tasks: dict[str, asyncio.Task],
 ) -> None:
     async with session_factory() as session:
@@ -1535,6 +1951,8 @@ async def resume_background_responses(
             session_factory=session_factory,
             backend=backend,
             prompt_cache=prompt_cache,
+            web_search_backend=web_search_backend,
+            image_generation_backend=image_generation_backend,
             background_tasks=background_tasks,
             response_id=str(job["response_id"]),
             tenant_id=job["tenant_id"],
@@ -1556,6 +1974,8 @@ async def _run_background_response_task(
     session_factory: Any,
     backend: ModelBackend,
     prompt_cache: PromptCache,
+    web_search_backend: WebSearchBackend | None,
+    image_generation_backend: ImageGenerationBackend | None,
     background_tasks: dict[str, asyncio.Task],
     response_id: str,
     tenant_id: str | None,
@@ -1567,6 +1987,8 @@ async def _run_background_response_task(
             repository=repository,
             backend=backend,
             prompt_cache=prompt_cache,
+            web_search_backend=web_search_backend,
+            image_generation_backend=image_generation_backend,
             session_factory=session_factory,
             background_tasks=background_tasks,
         )

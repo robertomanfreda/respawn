@@ -19,6 +19,10 @@ def _parse_csv_set(value: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+def mock_metadata(**options: Any) -> dict[str, str]:
+    return {"respawn_mock": json.dumps(options, separators=(",", ":"))}
+
+
 BASE_URL = os.getenv("RESPAWN_BASE_URL", "http://respawn:8080").rstrip("/")
 API_KEY = os.getenv("RESPAWN_API_KEY", "local-dev-key")
 SECONDARY_API_KEY = os.getenv("RESPAWN_SECONDARY_API_KEY", "respawn-other-key")
@@ -80,6 +84,8 @@ class BenchmarkState:
     function_followup_response_id: str | None = None
     reasoning_response_id: str | None = None
     reasoning_item: dict[str, Any] | None = None
+    web_search_response_id: str | None = None
+    image_generation_response_id: str | None = None
     context_compacted_response_id: str | None = None
     compacted_window: list[dict[str, Any]] | None = None
     benchmark_comparison: dict[str, Any] | None = None
@@ -155,6 +161,15 @@ def benchmark_cases() -> list[BenchmarkCase]:
         BenchmarkCase("responses.tools.parallel_or_capability_error", {"tools"}, {"request.parallel_and_max_tool_calls"}, case_responses_tools_parallel_or_capability_error),
         BenchmarkCase("responses.tools.unsupported_builtin_tools", {"tools"}, {"request.unsupported_tool_categories", "io.legacy_tool_result_unsupported"}, lambda state: case_responses_tools_unsupported_builtin_tools()),
         BenchmarkCase("responses.tools.no_internal_execution", {"tools"}, set(), case_responses_tools_no_internal_execution),
+        BenchmarkCase("responses.web_search.basic", {"tools", "web_search"}, {"request.web_search_tool", "io.web_search_call_items"}, case_responses_web_search_basic),
+        BenchmarkCase("responses.web_search.citations", {"tools", "web_search"}, {"response.web_search_citations"}, case_responses_web_search_citations),
+        BenchmarkCase("responses.web_search.disabled", {"tools", "web_search"}, {"request.web_search_disabled_error"}, lambda state: case_responses_web_search_disabled()),
+        BenchmarkCase("responses.web_search.filters", {"tools", "web_search"}, {"request.web_search_filters"}, case_responses_web_search_filters),
+        BenchmarkCase("responses.web_search.stream", {"tools", "web_search", "streaming"}, {"streaming.web_search_call_events"}, case_responses_web_search_stream),
+        BenchmarkCase("responses.web_search.retrieve", {"tools", "web_search", "state"}, {"state.web_search_item_storage"}, case_responses_web_search_retrieve),
+        BenchmarkCase("responses.image_generation.basic", {"tools", "image_generation"}, {"request.image_generation_tool", "io.image_generation_call_items"}, case_responses_image_generation_basic),
+        BenchmarkCase("responses.image_generation.disabled", {"tools", "image_generation"}, {"request.image_generation_disabled_error"}, lambda state: case_responses_image_generation_disabled()),
+        BenchmarkCase("responses.image_generation.stream", {"tools", "image_generation", "streaming"}, {"streaming.image_generation_call_events"}, case_responses_image_generation_stream),
         BenchmarkCase("responses.retrieve", {"core", "state"}, {"endpoints.responses.retrieve"}, case_responses_retrieve),
         BenchmarkCase("responses.input_items", {"state"}, {"endpoints.responses.input_items"}, case_responses_input_items),
         BenchmarkCase("responses.items.input_storage", {"state"}, {"state.input_item_storage"}, case_responses_items_input_storage),
@@ -214,6 +229,8 @@ def benchmark_cases() -> list[BenchmarkCase]:
         BenchmarkCase("metrics", {"observability"}, {"observability.metrics"}, case_metrics),
         BenchmarkCase("metrics.background_jobs", {"background", "observability"}, {"observability.background_metrics"}, case_background_metrics),
         BenchmarkCase("metrics.function_tools", {"tools", "observability"}, {"observability.function_tool_metrics"}, case_function_tool_metrics),
+        BenchmarkCase("metrics.web_search", {"tools", "web_search", "observability"}, {"observability.web_search_metrics"}, case_web_search_metrics),
+        BenchmarkCase("metrics.image_generation", {"tools", "image_generation", "observability"}, {"observability.image_generation_metrics"}, case_image_generation_metrics),
         BenchmarkCase("metrics.reasoning", {"reasoning", "observability"}, {"observability.reasoning_metrics"}, case_reasoning_metrics),
         BenchmarkCase("metrics.context_management", {"context", "observability"}, {"observability.context_metrics"}, case_context_management_metrics),
         BenchmarkCase("metrics.include_expansions", {"include", "observability"}, {"observability.include_metrics"}, case_include_metrics),
@@ -518,6 +535,15 @@ def calculator_tool() -> dict[str, Any]:
     }
 
 
+def namespace_calculator_tool() -> dict[str, Any]:
+    return {
+        "type": "namespace",
+        "name": "mcp__math__",
+        "description": "Math tools.",
+        "tools": [calculator_tool()],
+    }
+
+
 def ensure_function_call_response(state: BenchmarkState) -> tuple[str, dict[str, Any]]:
     if state.function_call_response_id and state.function_call_item:
         return state.function_call_response_id, state.function_call_item
@@ -539,6 +565,18 @@ def ensure_function_call_response(state: BenchmarkState) -> tuple[str, dict[str,
 
 
 def case_responses_tools_function_call(state: BenchmarkState) -> str:
+    namespace_body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Say namespace tool schema accepted.",
+            "tools": [namespace_calculator_tool()],
+            "tool_choice": "none",
+            "max_output_tokens": completion_output_tokens(16),
+            "store": False,
+        },
+    )
+    expect_response_final(namespace_body)
     _, item = ensure_function_call_response(state)
     return item["call_id"]
 
@@ -653,7 +691,7 @@ def case_responses_tools_no_internal_execution(state: BenchmarkState) -> str:
         "/v1/responses",
         {
             "model": MODEL,
-            "input": "Loop forever by calling echo again and again.",
+            "input": "Function call loop guard.",
             "tools": [
                 {
                     "type": "function",
@@ -679,7 +717,7 @@ def case_responses_tools_no_internal_execution(state: BenchmarkState) -> str:
 
 def case_responses_tools_unsupported_builtin_tools() -> str:
     cases = [
-        ({"model": MODEL, "input": "search", "tools": [{"type": "web_search"}]}, "tools.0.type"),
+        ({"model": MODEL, "input": "run hosted code", "tools": [{"type": "code_interpreter"}]}, "tools.0.type"),
         ({"model": MODEL, "input": [{"type": "tool_result", "call_id": "call_1", "output": "4"}]}, "input.0.type"),
     ]
     params = []
@@ -691,6 +729,214 @@ def case_responses_tools_unsupported_builtin_tools() -> str:
         expect(error.get("param") == expected_param, f"unexpected unsupported tool category param: {body}")
         params.append(expected_param)
     return ",".join(params)
+
+
+def web_search_tool(*, filters: dict[str, Any] | None = None, external_web_access: bool = True) -> dict[str, Any]:
+    tool: dict[str, Any] = {"type": "web_search"}
+    if filters is not None:
+        tool["filters"] = filters
+    if not external_web_access:
+        tool["external_web_access"] = False
+    return tool
+
+
+def case_responses_web_search_basic(state: BenchmarkState) -> str:
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Search the web for latest Respawn benchmark web search details.",
+            "tools": [web_search_tool()],
+            "tool_choice": "required",
+            "max_output_tokens": completion_output_tokens(64),
+            "store": True,
+        },
+    )
+    expect_response_final(body)
+    item = expect_web_search_call_item(body)
+    expect(body.get("output", [])[1].get("type") == "message", f"web_search_call should precede final message: {body}")
+    state.web_search_response_id = body["id"]
+    return item["id"]
+
+
+def case_responses_web_search_citations(state: BenchmarkState) -> str:
+    if not state.web_search_response_id:
+        case_responses_web_search_basic(state)
+    body, _, _ = request_json("GET", f"/v1/responses/{state.web_search_response_id}")
+    annotations = web_search_annotations(body)
+    expect(annotations, f"web search response missing url_citation annotations: {body}")
+    return annotations[0]["url"]
+
+
+def case_responses_web_search_disabled() -> str:
+    body, status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Search the web with external access disabled.",
+            "tools": [web_search_tool(external_web_access=False)],
+            "tool_choice": "required",
+            "store": False,
+        },
+    )
+    expect(status == 400, f"web_search disabled/cache-only error returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") == "unsupported_parameter", f"unexpected web_search disabled error: {body}")
+    expect(error.get("param") in {"tools.0.external_web_access", "tools.0.type"}, f"unexpected web_search disabled param: {body}")
+    return error["param"]
+
+
+def case_responses_web_search_filters(state: BenchmarkState) -> str:
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Search the web for latest Respawn filtered web search details.",
+            "tools": [web_search_tool(filters={"blocked_domains": ["blocked.example.net"]})],
+            "tool_choice": "required",
+            "include": ["web_search_call.action.sources"],
+            "max_output_tokens": completion_output_tokens(64),
+            "store": False,
+        },
+    )
+    item = expect_web_search_call_item(body)
+    sources = item.get("action", {}).get("sources") or []
+    expect(sources, f"web_search filters response missing included sources: {body}")
+    expect(all("blocked.example.net" not in source.get("url", "") for source in sources), f"blocked domain leaked into sources: {sources}")
+    return str(len(sources))
+
+
+def case_responses_web_search_stream(state: BenchmarkState) -> str:
+    text, status, _ = request_raw(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Search the web for latest Respawn streaming web search details.",
+            "tools": [web_search_tool()],
+            "tool_choice": "required",
+            "stream": True,
+            "max_output_tokens": completion_output_tokens(64),
+            "store": True,
+        },
+    )
+    expect(status == 200, f"web_search stream returned HTTP {status}: {text[:500]}")
+    events = parse_sse_events(text)
+    event_types = [event["event"] for event in events]
+    expect(event_types[-1] in {"response.completed", "response.incomplete"}, f"missing terminal web_search stream event: {event_types}")
+    added = next((event for event in events if event["event"] == "response.output_item.added" and (event["data"].get("item") or {}).get("type") == "web_search_call"), None)
+    done = next((event for event in events if event["event"] == "response.output_item.done" and (event["data"].get("item") or {}).get("type") == "web_search_call"), None)
+    expect(added is not None and done is not None, f"web_search stream missing item lifecycle: {event_types}")
+    return done["data"]["item"]["id"]
+
+
+def case_responses_web_search_retrieve(state: BenchmarkState) -> str:
+    if not state.web_search_response_id:
+        case_responses_web_search_basic(state)
+    body, _, _ = request_json("GET", f"/v1/responses/{state.web_search_response_id}?include=web_search_call.action.sources")
+    item = expect_web_search_call_item(body)
+    annotations = web_search_annotations(body)
+    sources = item.get("action", {}).get("sources") or []
+    expect(sources, f"retrieved web_search response missing sources include: {body}")
+    expect(annotations, f"retrieved web_search response missing annotations: {body}")
+    return item["id"]
+
+
+def expect_web_search_call_item(body: dict[str, Any]) -> dict[str, Any]:
+    output = body.get("output") or []
+    item = next((candidate for candidate in output if candidate.get("type") == "web_search_call"), None)
+    expect(item is not None, f"response missing web_search_call item: {body}")
+    action = item.get("action") or {}
+    expect(action.get("type") == "search", f"web_search_call action missing search type: {item}")
+    expect(action.get("queries"), f"web_search_call action missing queries: {item}")
+    return item
+
+
+def image_generation_tool(*, quality: str = "low", size: str = "512x512", partial_images: int = 0) -> dict[str, Any]:
+    return {"type": "image_generation", "quality": quality, "size": size, "partial_images": partial_images}
+
+
+def case_responses_image_generation_basic(state: BenchmarkState) -> str:
+    body, _, _ = post_json(
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Generate image of a small Respawn benchmark square.",
+            "tools": [image_generation_tool()],
+            "tool_choice": {"type": "image_generation"},
+            "store": True,
+        },
+    )
+    expect_response_completed(body)
+    item = expect_image_generation_call_item(body)
+    expect(body.get("output_text") == "", f"image_generation response should not require text output: {body}")
+    state.image_generation_response_id = body["id"]
+    retrieved, _, _ = request_json("GET", f"/v1/responses/{body['id']}")
+    expect(retrieved.get("output") == body.get("output"), f"retrieved image_generation output changed: {retrieved} vs {body}")
+    return item["id"]
+
+
+def case_responses_image_generation_disabled() -> str:
+    body, status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Generate image with unsupported partial images.",
+            "tools": [image_generation_tool(partial_images=1)],
+            "tool_choice": {"type": "image_generation"},
+            "store": False,
+        },
+    )
+    expect(status == 400, f"image_generation unsupported path returned HTTP {status}: {body}")
+    error = body.get("error") or {}
+    expect(error.get("code") == "unsupported_parameter", f"unexpected image_generation error: {body}")
+    expect(error.get("param") == "tools.0.partial_images", f"unexpected image_generation param: {body}")
+    return error["param"]
+
+
+def case_responses_image_generation_stream(state: BenchmarkState) -> str:
+    text, status, _ = request_raw(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "Generate image of a streaming Respawn benchmark square.",
+            "tools": [image_generation_tool()],
+            "tool_choice": {"type": "image_generation"},
+            "stream": True,
+            "store": True,
+        },
+    )
+    expect(status == 200, f"image_generation stream returned HTTP {status}: {text[:500]}")
+    events = parse_sse_events(text)
+    event_types = [event["event"] for event in events]
+    expect(event_types[-1] == "response.completed", f"missing terminal image_generation stream event: {event_types}")
+    added = next((event for event in events if event["event"] == "response.output_item.added" and (event["data"].get("item") or {}).get("type") == "image_generation_call"), None)
+    done = next((event for event in events if event["event"] == "response.output_item.done" and (event["data"].get("item") or {}).get("type") == "image_generation_call"), None)
+    expect(added is not None and done is not None, f"image_generation stream missing item lifecycle: {event_types}")
+    expect((done["data"].get("item") or {}).get("result"), f"image_generation stream item missing result: {done}")
+    return done["data"]["item"]["id"]
+
+
+def expect_image_generation_call_item(body: dict[str, Any]) -> dict[str, Any]:
+    output = body.get("output") or []
+    item = next((candidate for candidate in output if candidate.get("type") == "image_generation_call"), None)
+    expect(item is not None, f"response missing image_generation_call item: {body}")
+    expect(item.get("status") == "completed", f"image_generation_call status should be completed: {item}")
+    expect(item.get("result"), f"image_generation_call missing base64 result: {item}")
+    expect(item.get("output_format") == "png", f"image_generation_call output_format should be png: {item}")
+    expect(item.get("size"), f"image_generation_call missing size: {item}")
+    return item
+
+
+def web_search_annotations(body: dict[str, Any]) -> list[dict[str, Any]]:
+    annotations: list[dict[str, Any]] = []
+    for item in body.get("output") or []:
+        for content in item.get("content") or []:
+            annotations.extend(annotation for annotation in content.get("annotations") or [] if annotation.get("type") == "url_citation")
+    return annotations
 
 
 def case_responses_tools_stream_arguments(state: BenchmarkState) -> str:
@@ -1442,8 +1688,9 @@ def case_responses_background_cancel(state: BenchmarkState) -> str:
         "/v1/responses",
         {
             "model": MODEL,
-            "input": "Respawn benchmark background slow cancellation. Produce a careful but concise answer.",
+            "input": "Respawn benchmark background cancellation. Produce a careful but concise answer.",
             "background": True,
+            "metadata": mock_metadata(delay_seconds=0.15),
             "max_output_tokens": completion_output_tokens(128),
             "store": True,
         },
@@ -1493,8 +1740,9 @@ def case_responses_background_timeout() -> str:
             "/v1/responses",
             {
                 "model": MODEL,
-                "input": "background timeout",
+                "input": "background delay fixture",
                 "background": True,
+                "metadata": mock_metadata(delay_seconds=0.25),
                 "max_output_tokens": completion_output_tokens(64),
                 "store": True,
             },
@@ -1508,14 +1756,14 @@ def case_responses_background_timeout() -> str:
         "/v1/responses",
         {
             "model": MODEL,
-            "input": "Respawn benchmark background timeout guard smoke. Reply briefly.",
+            "input": "Respawn benchmark background duration guard smoke. Reply briefly.",
             "background": True,
             "max_output_tokens": min(MAX_OUTPUT_TOKENS, 16),
             "store": True,
         },
     )
     terminal = poll_response_terminal(created["id"], expected={"completed", "incomplete", "failed"})
-    expect(terminal.get("background") is True, f"background timeout guard response missing background flag: {terminal}")
+    expect(terminal.get("background") is True, f"background duration guard response missing background flag: {terminal}")
     return f"guard path {terminal['status']}"
 
 
@@ -2142,6 +2390,65 @@ def case_function_tool_metrics(state: BenchmarkState) -> str:
     for metric in required:
         expect(metric in text, f"missing function tool metric {metric}")
     return "function tool metrics present"
+
+
+def case_web_search_metrics(state: BenchmarkState) -> str:
+    case_responses_web_search_basic(state)
+    case_responses_web_search_filters(state)
+    case_responses_web_search_disabled()
+    timeout_body, timeout_status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "web search failure fixture",
+            "tools": [web_search_tool()],
+            "tool_choice": "required",
+            "metadata": mock_metadata(web_search_error="timeout"),
+            "store": False,
+        },
+    )
+    expect(timeout_status == 504, f"web_search timeout metric request returned HTTP {timeout_status}: {timeout_body}")
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_web_search_requests_total",
+        "gateway_web_search_latency_seconds_bucket",
+        "gateway_web_search_results_total",
+        "gateway_web_search_errors_total",
+        "gateway_web_search_filtered_results_total",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing web search metric {metric}")
+    return "web search metrics present"
+
+
+def case_image_generation_metrics(state: BenchmarkState) -> str:
+    case_responses_image_generation_basic(state)
+    timeout_body, timeout_status, _ = request_json_error(
+        "POST",
+        "/v1/responses",
+        {
+            "model": MODEL,
+            "input": "image generation failure fixture",
+            "tools": [image_generation_tool()],
+            "tool_choice": {"type": "image_generation"},
+            "metadata": mock_metadata(image_generation_error="timeout"),
+            "store": False,
+        },
+    )
+    expect(timeout_status == 504, f"image_generation timeout metric request returned HTTP {timeout_status}: {timeout_body}")
+    text, status, _ = request_raw("GET", "/metrics")
+    expect(status == 200, f"/metrics returned HTTP {status}")
+    required = [
+        "gateway_image_generation_requests_total",
+        "gateway_image_generation_latency_seconds_bucket",
+        "gateway_image_generation_errors_total",
+        "gateway_image_generation_pixels_total",
+    ]
+    for metric in required:
+        expect(metric in text, f"missing image generation metric {metric}")
+    return "image generation metrics present"
 
 
 def case_reasoning_metrics(state: BenchmarkState) -> str:

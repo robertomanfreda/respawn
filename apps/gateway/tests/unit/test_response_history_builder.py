@@ -71,3 +71,50 @@ def test_saved_function_call_replays_through_previous_response_chain():
         },
         {"role": "tool", "tool_call_id": "call_123", "content": "4"},
     ]
+
+
+def test_protocol_tool_call_input_items_replay_as_context():
+    messages = input_to_messages(
+        [
+            {
+                "id": "ws_123",
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {
+                    "type": "search",
+                    "queries": ["cos'e kubernetes"],
+                    "sources": [
+                        {
+                            "title": "Kubernetes",
+                            "url": "https://kubernetes.io/",
+                            "snippet": "Production-grade container orchestration.",
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "ig_123",
+                "type": "image_generation_call",
+                "status": "completed",
+                "revised_prompt": "un rospo",
+                "size": "512x512",
+            },
+            {"role": "user", "content": "continua"},
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "system",
+            "content": "Previous web search results for: cos'e kubernetes\n\n[1] Kubernetes\nURL: https://kubernetes.io/\nSnippet: Production-grade container orchestration.",
+        },
+        {
+            "role": "system",
+            "content": (
+                "Previous image generation output for prompt: un rospo\n"
+                "Size: 512x512\n"
+                "This is context only. Do not generate another image unless the latest user message explicitly asks for one or for a visual revision."
+            ),
+        },
+        {"role": "user", "content": "continua"},
+    ]

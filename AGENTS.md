@@ -28,6 +28,9 @@ Main areas:
   environment overrides.
 - For OpenAI API compatibility work, check the current official OpenAI docs and
   make unsupported behavior explicit instead of adding silent no-ops.
+- Never solve routing, intent, or compatibility problems by stubbing special
+  words, prompt phrases, or one-off cases. Solutions must be general, explicit,
+  and correct across equivalent inputs.
 - When changing public API behavior, update schemas, tests, README examples, and
   the benchmark suite together.
 - When changing Responses compatibility, update the machine-readable manifest,
@@ -78,9 +81,10 @@ Respawn currently supports a practical subset of the OpenAI Responses API:
 blocking and streaming text responses, response retrieval/deletion, input item
 listing, input token counting, Responses-native `previous_response_id` state,
 structured outputs, local prompt-cache accounting, local reasoning items,
-Responses function tool calling protocol compatibility without local tool
-execution, chat completions, models, auth, metrics, and persistence. It does not
-target the OpenAI Conversations API.
+Responses function tool calling protocol compatibility, including
+namespace-wrapped function tools, opt-in query-style `web_search`, chat
+completions, opt-in SD1.5-backed `image_generation`, models, auth, metrics, and
+persistence. It does not target the OpenAI Conversations API.
 
 When expanding Responses compatibility:
 
@@ -90,9 +94,11 @@ When expanding Responses compatibility:
   external-worker assumptions.
 - Prefer explicit `400`/`422` style errors for unsupported fields over accepting
   fields that do nothing.
-- Treat function tools as protocol data only. Do not add filesystem, shell, git,
-  `apply_patch`, workspace, MCP-hosting, or other local tool execution inside
-  Respawn.
+- Treat function and namespace-wrapped function tools as protocol data only.
+  Keep `web_search` bounded to configured query-style providers and
+  `image_generation` bounded to configured text-to-image providers. Do not add
+  filesystem, shell, git, `apply_patch`, workspace, MCP-hosting, browser, or
+  other local tool execution inside Respawn.
 - Keep the support matrix in [`COMPATIBILITY.md`](COMPATIBILITY.md) accurate.
 - Record deliberate gaps as explicit unsupported manifest rows, not as a
   separate roadmap document.

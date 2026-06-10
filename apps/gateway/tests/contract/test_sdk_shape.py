@@ -7,6 +7,7 @@ import pytest
 from openai import NotFoundError, OpenAI
 from uvicorn import Config, Server
 
+from src.adapters.mock_control import mock_metadata
 from src.config import get_settings
 from src.main import create_app
 
@@ -119,7 +120,7 @@ def test_official_openai_python_sdk_background_cancel(tmp_path, monkeypatch):
 
     try:
         sdk = OpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key="local-dev-key")
-        created = sdk.responses.create(model="gpt-oss-120b", input="background slow sdk", background=True)
+        created = sdk.responses.create(model="gpt-oss-120b", input="background sdk", background=True, metadata=mock_metadata(delay_seconds=0.15))
         cancelled = sdk.responses.cancel(created.id)
         assert created.background is True
         assert cancelled.id == created.id
@@ -157,7 +158,7 @@ def test_official_openai_python_sdk_function_call_followup(tmp_path, monkeypatch
         call = first_body["output"][0]
         assert call["type"] == "function_call"
         assert call["name"] == "calculator"
-        assert call["arguments"] == '{"expression":"2+2"}'
+        assert call["arguments"] == '{"expression":"string"}'
 
         second = sdk.responses.create(
             model="gpt-oss-120b",

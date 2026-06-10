@@ -1,168 +1,125 @@
 # Respawn Future Work
 
-This document tracks candidate work that is intentionally outside the current
-compatibility claim. The source of truth for what Respawn supports today remains
-`docs/COMPATIBILITY.md`.
+This document tracks only candidate work that is not implemented today. The
+source of truth for current support remains `docs/COMPATIBILITY.md`.
 
-Future work should graduate into the compatibility matrix only after it has
-implementation, explicit tests or benchmark coverage, and OpenAI-shaped failure
-behavior for unsupported paths.
+Implemented features should not stay here as roadmap residue. Move future work
+into the compatibility matrix only after it has implementation, tests or
+benchmark coverage, and OpenAI-shaped failure behavior for unsupported paths.
+
+## Current Non-Goals
+
+The unsupported areas below are deliberately excluded until they have a clear
+execution boundary, sandbox model, artifact policy, and operator controls.
 
 ## Priorities
 
 | Priority | Workstream | Why it matters |
 | --- | --- | --- |
-| P0 | Codex compatibility probe | Confirms whether Codex can use Respawn through the native Responses wire protocol today. |
-| P1 | Agent tool protocol expansion | Removes the main blocker for richer agent clients when they use native Responses tool types instead of plain function tools. |
-| P2 | Browser/web tool support | Useful for up-to-date agent workflows, but needs a clear local or hosted execution model. |
-| P2 | Code interpreter and computer tool support | Powerful but higher-risk, because they require sandboxing, artifact handling, and operator controls. |
+| P1 | Hosted tool result expansions | Required before OpenAI-hosted tool include values can be represented locally. |
+| P2 | Code interpreter | Powerful but requires sandboxed execution and artifact lifecycle management. |
+| P2 | Computer/browser automation | Requires a controlled UI environment, action loop, approvals, and isolation. |
+| P2 | Hosted MCP and local executors | Useful for agents, but unsafe without explicit ownership and sandbox boundaries. |
+| P3 | Audio and realtime-style inputs | Separate modality with different backend and streaming requirements. |
+| P3 | Image editing and partial-image streaming | Requires edit inputs, intermediate artifacts, and progressive output events. |
 
-## Codex Compatibility Probe
+## Hosted Tool Result Expansions
 
-Goal: verify and document whether Codex CLI or Codex for VS Code can point at
-Respawn as a custom Responses-compatible provider.
+Unsupported today:
 
-Known starting point:
+- `include=file_search_call.results`
+- hosted `web_search` result expansions
+- `include=code_interpreter_call.outputs`
+- `include=computer_call.output`
 
-```toml
-model_provider = "respawn"
-model = "gpt-oss:120b"
+Requirements:
 
-[model_providers.respawn]
-name = "Respawn"
-base_url = "http://localhost:8080/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-```
+- Define local item shapes for each hosted-tool output Respawn chooses to
+  support.
+- Store, retrieve, stream, and replay those items through `previous_response_id`.
+- Keep unsupported hosted include values explicit instead of silently dropping
+  them.
+- Add benchmark coverage for every include value that becomes supported.
 
-Candidate tasks:
+## Code Interpreter
 
-- Run a minimal Codex request through Respawn with `wire_api = "responses"`.
-- Capture the exact request shape Codex sends for simple chat, shell work,
-  file edits, and patch application.
-- Determine whether Codex exposes its local tools as ordinary `function` tools
-  or native Responses built-in tools.
-- Add a small reproducible probe under the benchmark or tooling tree.
-- Document a supported local Codex configuration once the behavior is proven.
+Code interpreter would require Respawn to host sandboxed execution rather than
+only proxy model output.
 
-Observed starting point:
+Required design work:
 
-- Codex CLI `0.137.0-alpha.4` sends `client_metadata`, `prompt_cache_key`,
-  `store=false`, `stream=true`, `parallel_tool_calls=false`, function tools for
-  local client actions, plus native `web_search` and `image_generation` tools.
-- Respawn accepts `client_metadata` as opaque request metadata as of
-  compatibility manifest `phase-16`.
-- The next Codex smoke-test blocker is native built-in tool handling:
-  `web_search` and `image_generation` remain explicitly unsupported until a
-  local/client/hosted execution boundary is defined.
+- Isolated runtime container per request, tenant, or session.
+- CPU, memory, disk, network, and wall-clock limits.
+- Uploaded-file mounting and generated-artifact persistence.
+- Cleanup policy for temporary files, kernels, and outputs.
+- Explicit operator configuration and metrics for execution activity.
+- Tests proving code cannot escape the sandbox or access unauthorized files.
 
-Acceptance criteria:
+Until that exists, code/file execution tool types should remain explicit
+unsupported errors.
 
-- A Codex smoke test can complete through Respawn with a local model.
-- Respawn logs and metrics identify the request as `backend=ollama`,
-  `model=<selected model>`, and the relevant Responses feature family.
-- Unsupported Codex tool shapes fail with explicit OpenAI-shaped errors instead
-  of schema surprises.
+## Computer And Browser Automation
 
-## Agent Tool Protocol Expansion
+Required design work:
 
-Goal: support the tool protocol shapes needed by agent clients without turning
-Respawn into an unsafe local tool executor by accident.
+- Controlled browser or desktop environment.
+- Screenshot capture, action application, and observe/click/type loops.
+- Network allowlists and timeout limits.
+- Human-approval hooks for sensitive actions.
+- Artifact storage for screenshots and traces.
+- Tests proving actions cannot escape the configured browser or desktop
+  sandbox.
 
-Current boundary:
+Unsupported browser/computer paths should continue to fail explicitly.
 
-- Respawn supports `function` tool protocol data.
-- Respawn does not execute tools locally.
-- Built-in, hosted, MCP, shell, apply-patch, browser, code, computer, image, and
-  internal tool categories are currently rejected.
+## Hosted MCP And Local Executors
 
-Candidate order:
+Future executor support would need:
 
-1. Discover the real tool schemas emitted by Codex against a custom Responses
-   provider.
-2. Add protocol-only acceptance for low-risk native tool items where the client
-   remains responsible for execution.
-3. Add explicit capability errors for tool types that require Respawn-hosted
-   execution.
-4. Consider local execution only behind clear configuration, sandboxing, and
-   audit logging.
+- A clear distinction between client-executed protocol data and Respawn-hosted
+  execution.
+- Per-tool operator enablement.
+- Strict sandboxing for shell, filesystem, git, workspace, and `apply_patch`
+  actions.
+- Audit logs and metrics for every executed action.
+- Tenant isolation and denial-by-default behavior.
 
-Likely first candidates:
+Without those controls, shell/filesystem/git/workspace/apply-patch/MCP-hosting
+tool categories should stay unsupported.
 
-- `apply_patch`: useful for coding agents if the client or harness applies the
-  patch and Respawn only stores/streams the item shape.
-- Local shell/function bridge: useful only if represented as client-executed
-  function calls or gated behind a strict executor.
-- Web search/browser: useful for current information, but should start as a
-  clearly documented execution boundary.
+## Audio And Realtime Inputs
 
-Acceptance criteria:
+Unsupported today:
 
-- Supported tool shapes are stored, streamed, replayed through
-  `previous_response_id`, and covered by benchmark cases.
-- Tool execution ownership is obvious from docs and error messages.
-- No local filesystem, shell, browser, or GUI action can run unless explicitly
-  enabled by operator configuration.
+- `input_audio`
+- realtime audio loops
+- transcription/audio generation surfaces
 
-## Browser And Web Support
+Required design work:
 
-Goal: support agent workflows that need current web information or browser
-interaction.
+- Backend selection for transcription, audio understanding, or generation.
+- Streaming request and response handling.
+- File/artifact handling for audio inputs and outputs.
+- Capability errors for models that cannot process audio.
+- Benchmarks for success and unsupported-model paths.
 
-Two separate products should not be conflated:
+## Image Editing And Partial Images
 
-- Web search: query-and-citation style retrieval for up-to-date information.
-- Browser/computer automation: screenshot, click, type, and observe loops over
-  a real UI.
+Required design work:
 
-Candidate tasks:
-
-- Decide whether web search is hosted, local, or client-executed.
-- Add request validation and include expansion behavior for the selected model.
-- Add citation and source metadata storage if web results are returned through
-  Respawn.
-- For browser automation, require sandbox boundaries, network allowlists,
-  timeout limits, and human-approval hooks before any implementation.
-
-Acceptance criteria:
-
-- Web results or browser actions are auditable through logs and metrics.
-- Unsupported browser/computer paths fail explicitly.
-- The compatibility matrix distinguishes web search from computer-use flows.
-
-## Code Interpreter And Computer Use
-
-Goal: evaluate whether Respawn should ever host sandboxed execution tools.
-
-Code interpreter would require:
-
-- A sandboxed Python/runtime container.
-- Uploaded and generated file handling.
-- Resource limits for CPU, memory, disk, network, and wall-clock time.
-- Artifact persistence and cleanup policies.
-- Clear tenant isolation.
-
-Computer use would require:
-
-- A controlled desktop/browser environment.
-- Screenshot capture and action application loops.
-- Strong allowlists, timeouts, and operator approvals.
-- Tests that verify actions cannot escape the intended sandbox.
-
-Recommendation:
-
-- Keep these as P2 until Codex compatibility and the local tool execution
-  boundary are proven.
-- Prefer client-executed tools first, because Codex already owns many local
-  development actions in its harness.
+- Request validation for edit/image-to-image fields.
+- Backend adapter support for masks, init images, and strength settings.
+- Streaming event support for partial images.
+- Storage and retrieval of intermediate image artifacts when exposed.
+- Benchmark coverage for generated final images and partial-image event order.
 
 ## Graduation Checklist
 
 Before moving any item from this document into supported compatibility:
 
-- Add implementation behind a documented config path.
+- Add implementation behind a documented configuration path.
 - Add unit or integration tests for success and failure cases.
-- Add benchmark coverage for any supported public behavior.
-- Add metrics or logs when the behavior affects operations.
+- Add benchmark coverage for every supported public behavior.
+- Add metrics or logs when behavior affects operations.
 - Update `docs/COMPATIBILITY.md` and the manifest source together.
-- Update `docs/OPERATIONS.md` only when operators need new runtime guidance.
+- Update `docs/OPERATIONS.md` only when operators need runtime guidance.
