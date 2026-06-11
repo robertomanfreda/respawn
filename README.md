@@ -17,7 +17,7 @@ jobs belong to the model backend underneath it.
 - Blocking, streaming, background, retrieve, delete, cancel, and input-item
   Responses flows.
 - Stateful `previous_response_id` reconstruction stored in Postgres or SQLite.
-- Responses function-tool protocol support without local function execution.
+- Responses function/custom tool protocol support without local tool execution.
 - Opt-in local Responses `web_search` through mock or SearXNG providers.
 - Opt-in local Responses `image_generation` through ComfyUI, with Automatic1111 kept as a legacy backend option.
 - Local Files API subset and file/image input normalization.
@@ -49,7 +49,7 @@ you need the backend to behave like a local OpenAI-shaped platform:
 | Streaming event shape | Backend-native streams vary by provider. | Streams are normalized into Responses lifecycle events. |
 | Background jobs | Usually not provided as OpenAI-shaped response lifecycle state. | `background=true`, polling, terminal retrieval, cancellation, and metrics are implemented locally. |
 | File and image inputs | Backend-specific handling and error behavior. | Local Files API subset, file extraction, artifact records, and vision capability checks. |
-| Function tool protocol | Backend support varies and may be chat-shaped. | Responses function-call items, including namespace-wrapped function tools, are validated, stored, replayed, and streamed as protocol data. |
+| Tool protocol | Backend support varies and may be chat-shaped. | Responses function-call and custom-tool-call items, including namespace-wrapped function/custom tools, are validated, stored, replayed, and streamed as protocol data. |
 | Web search | Hosted providers execute search internally. | Optional local `web_search` runs through a configured provider, emits `web_search_call`, and adds URL citations. |
 | Image generation | Hosted providers execute image tools internally. | Optional local `image_generation` runs through a configured ComfyUI or Automatic1111-compatible provider and emits `image_generation_call` with a base64 PNG. |
 | Context planning | Mostly a client concern. | Local token estimates, truncation, compaction, and prompt-cache accounting. |
@@ -77,7 +77,7 @@ Current manifest summary:
 
 | Tracked features | Supported or conditional | Explicitly unsupported |
 | ---: | ---: | ---: |
-| 128 | 121 | 7 |
+| 130 | 123 | 7 |
 
 Respawn deliberately does not implement the OpenAI Conversations API, browser
 actions, hosted tool execution beyond opt-in local query-style `web_search` and
@@ -314,14 +314,17 @@ requires `store=true`.
 
 ### Tool Calling
 
-Respawn supports the Responses function-tool protocol:
+Respawn supports the Responses function/custom tool protocol:
 
 1. Clients send `type=function` tool definitions.
 2. The model may emit `function_call` output items.
 3. Clients execute functions themselves.
 4. Clients submit `function_call_output` input items in a follow-up request.
 
-Respawn never executes function tools. Query-style `web_search` and
+For `type=custom`, Respawn maps the free-form custom tool to the local backend's
+function-call shape, emits `custom_tool_call`, stores/replays the item, and
+accepts `custom_tool_call_output` in follow-up requests. Respawn never executes
+function or custom tools. Query-style `web_search` and
 text-to-image `image_generation` are available only when explicitly enabled and
 configured. Hosted tools, shell, filesystem, git, workspace, browser, code
 interpreter, MCP hosting, and similar execution surfaces are explicitly out of
@@ -357,7 +360,8 @@ high-level local metadata and does not expose raw chain-of-thought.
 
 Respawn emits:
 
-- Structured JSON request logs.
+- Structured JSON request logs, with full model input/output payloads available
+  at `LOG_LEVEL=DEBUG`.
 - `x-request-id` headers.
 - HTTP, endpoint, feature-family, error, latency, and in-flight metrics.
 - Responses metrics by model, mode, status, and storage behavior.
@@ -446,6 +450,7 @@ Important variables:
 | `MODEL_CONTEXT_WINDOWS` | Per-model context windows exposed by `/v1/models`, for example `gpt-oss:120b=131072`. |
 | `BACKEND_TIMEOUT_SECONDS` | Backend HTTP timeout. |
 | `BACKGROUND_JOB_TIMEOUT_SECONDS` | Background job timeout. |
+| `LOG_LEVEL` | Gateway log level: `INFO` by default, `DEBUG` for model request/response payloads, `TRACE` for metrics request logs and very-verbose streaming chunks. |
 | `PROMPT_CACHE_*` | Local prompt-cache accounting settings. |
 | `FILE_STORAGE_BACKEND` | File blob storage backend. |
 | `FILE_STORAGE_PATH` | Filesystem storage path when enabled. |
@@ -500,7 +505,7 @@ make benchmark-mock
 
 Automated coverage includes request validation, OpenAI-shaped errors, auth and
 tenant isolation, response-chain reconstruction, soft delete behavior,
-structured-output repair, streaming event formatting, function-tool protocol
+structured-output repair, streaming event formatting, function/custom-tool protocol
 flows, file/image normalization, Ollama adapter behavior, metrics, readiness,
 and OpenAI Python SDK contract checks.
 

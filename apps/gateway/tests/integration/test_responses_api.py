@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from src.adapters.mock_control import mock_metadata
 from src.config import get_settings
 from src.main import create_app
+from src.observability.logging import TRACE_LEVEL
 from src.services.context_management import unseal_compaction_content
 from src.services.reasoning_encryption import unseal_reasoning_content
 from tests.helpers import backend_tool_names
@@ -1698,6 +1699,34 @@ def test_request_logs_include_error_param(client, monkeypatch):
     assert extra["error_param"] == "client_metadata"
 
 
+def test_metrics_request_log_is_trace_noise(client, monkeypatch):
+    info_records = []
+    debug_records = []
+    log_records = []
+
+    def capture_info(message, **kwargs):
+        info_records.append((message, kwargs.get("extra") or {}))
+
+    def capture_debug(message, **kwargs):
+        debug_records.append((message, kwargs.get("extra") or {}))
+
+    def capture_log(level, message, **kwargs):
+        log_records.append((level, message, kwargs.get("extra") or {}))
+
+    monkeypatch.setattr("src.main.logger.info", capture_info)
+    monkeypatch.setattr("src.main.logger.debug", capture_debug)
+    monkeypatch.setattr("src.main.logger.log", capture_log)
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert not [record for record in info_records if record[0] == "HTTP request completed"]
+    assert not [record for record in debug_records if record[0] == "HTTP request completed"]
+    records = [record for record in log_records if record[0] == TRACE_LEVEL and record[1] == "HTTP request completed"]
+    assert records
+    assert records[-1][2]["feature"] == "metrics"
+
+
 def test_reasoning_metrics_include_effort_tokens_and_heavy_counter(tmp_path, monkeypatch):
     with configured_client(
         tmp_path,
@@ -1768,6 +1797,101 @@ def test_function_tool_request_emits_function_call_without_executing(client):
             "arguments": '{"expression":"string"}',
         }
     ]
+
+
+def test_custom_tool_request_emits_custom_tool_call_without_executing(client):
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate raw HTML for a small page",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "html_writer",
+                    "description": "Write raw HTML.",
+                    "format": {"type": "text"},
+                }
+            ],
+            "tool_choice": {"type": "custom", "name": "html_writer"},
+            "store": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output_text"] == ""
+    call = body["output"][0]
+    assert call["type"] == "custom_tool_call"
+    assert call["status"] == "completed"
+    assert call["call_id"] == "call_mock_html_writer"
+    assert call["name"] == "html_writer"
+    assert call["input"] == "string"
+
+    input_items = client.get(f"/v1/responses/{body['id']}/input_items?order=asc").json()["data"]
+    assert input_items[0]["content"][0]["text"] == "Generate raw HTML for a small page"
+
+
+def test_custom_tool_call_output_followup_with_previous_response_id(client):
+    first = client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate raw HTML please",
+            "tools": [{"type": "custom", "name": "html_writer"}],
+            "tool_choice": {"type": "custom", "name": "html_writer"},
+            "store": True,
+        },
+    ).json()
+    call = first["output"][0]
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first["id"],
+            "input": [{"type": "custom_tool_call_output", "call_id": call["call_id"], "output": "<h1>Cobalt</h1>"}],
+            "tools": [{"type": "custom", "name": "html_writer"}],
+            "store": True,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["output"][0]["type"] == "message"
+    assert body["output_text"] == "Tool result: <h1>Cobalt</h1>"
+    input_items = client.get(f"/v1/responses/{body['id']}/input_items?order=asc").json()["data"]
+    assert input_items[0]["type"] == "custom_tool_call_output"
+    assert input_items[0]["call_id"] == call["call_id"]
+
+
+def test_namespace_custom_tool_request_emits_namespaced_custom_tool_call(client):
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "Use namespace custom tool please",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__repo__",
+                    "description": "Repository tools.",
+                    "tools": [
+                        {
+                            "type": "custom",
+                            "name": "write_patch",
+                            "description": "Write a raw patch.",
+                            "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"},
+                        }
+                    ],
+                }
+            ],
+            "tool_choice": {"type": "custom", "namespace": "mcp__repo__", "name": "write_patch"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output_text"] == ""
+    assert body["output"][0]["type"] == "custom_tool_call"
+    assert body["output"][0]["name"] == "write_patch"
+    assert body["output"][0]["namespace"] == "mcp__repo__"
 
 
 def test_namespace_tool_request_emits_namespaced_function_call(client):

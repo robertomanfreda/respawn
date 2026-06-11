@@ -9,6 +9,7 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://respawn:respawn@postgres:5432/respawn
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MODEL_BACKEND: ${MODEL_BACKEND:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-oss:120b}

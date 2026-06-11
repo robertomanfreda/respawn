@@ -20,7 +20,7 @@ from src.adapters.ollama_backend import OllamaBackend
 from src.adapters.searxng_search import SearxngSearchBackend
 from src.api import chat, compatibility, files, health, metrics, models, prompt_templates, responses
 from src.config import get_settings
-from src.observability.logging import configure_logging
+from src.observability.logging import TRACE_LEVEL, configure_logging
 from src.observability.metrics import (
     ENDPOINT_REQUESTS,
     ERRORS,
@@ -176,22 +176,23 @@ def create_app() -> FastAPI:
             if response.status_code >= 500:
                 OPERATIONAL_FAILURES.labels(component=_failure_component(error_code, feature, request), code=error_code).inc()
             response.headers["x-request-id"] = request_id
-            logger.info(
-                "HTTP request completed",
-                extra={
-                    "request_id": request_id,
-                    "response_id": response_id,
-                    "tenant": getattr(request.state, "tenant_id", None),
-                    "feature": feature,
-                    "backend": getattr(request.app.state.settings, "model_backend", None),
-                    "method": request.method,
-                    "path": path,
-                    "latency_ms": round(elapsed * 1000, 3),
-                    "status": response.status_code,
-                    "error_code": error_code if response.status_code >= 400 else None,
-                    "error_param": error_param,
-                },
-            )
+            log_extra = {
+                "request_id": request_id,
+                "response_id": response_id,
+                "tenant": getattr(request.state, "tenant_id", None),
+                "feature": feature,
+                "backend": getattr(request.app.state.settings, "model_backend", None),
+                "method": request.method,
+                "path": path,
+                "latency_ms": round(elapsed * 1000, 3),
+                "status": response.status_code,
+                "error_code": error_code if response.status_code >= 400 else None,
+                "error_param": error_param,
+            }
+            if feature == "metrics":
+                logger.log(TRACE_LEVEL, "HTTP request completed", extra=log_extra)
+            else:
+                logger.info("HTTP request completed", extra=log_extra)
             return response
 
         if request.method == "POST" and idempotency_key is not None:

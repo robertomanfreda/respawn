@@ -645,6 +645,28 @@ def _input_item_from_record(row: ResponseItemRecord) -> dict[str, Any]:
             "output": row.output_json if row.output_json is not None else "",
             "status": row.status,
         }
+    if row.type == "custom_tool_call":
+        content = row.content_json if isinstance(row.content_json, dict) else {}
+        item = {
+            "id": row.id,
+            "type": "custom_tool_call",
+            "call_id": row.call_id,
+            "name": row.name,
+            "input": content.get("input") or "",
+            "status": row.status,
+        }
+        namespace = content.get("namespace")
+        if namespace is not None:
+            item["namespace"] = namespace
+        return item
+    if row.type == "custom_tool_call_output":
+        return {
+            "id": row.id,
+            "type": "custom_tool_call_output",
+            "call_id": row.call_id,
+            "output": row.output_json if row.output_json is not None else "",
+            "status": row.status,
+        }
     item = {
         "id": row.id,
         "type": row.type,
@@ -685,6 +707,28 @@ def _output_item_from_record(row: ResponseItemRecord) -> dict[str, Any]:
             "call_id": row.call_id,
             "name": row.name,
             "arguments": row.arguments_json if row.arguments_json is not None else "{}",
+        }
+    if row.type == "custom_tool_call":
+        content = row.content_json if isinstance(row.content_json, dict) else {}
+        item = {
+            "id": row.id,
+            "type": "custom_tool_call",
+            "status": row.status,
+            "call_id": row.call_id,
+            "name": row.name,
+            "input": content.get("input") or "",
+        }
+        namespace = content.get("namespace")
+        if namespace is not None:
+            item["namespace"] = namespace
+        return item
+    if row.type == "custom_tool_call_output":
+        return {
+            "id": row.id,
+            "type": "custom_tool_call_output",
+            "status": row.status,
+            "call_id": row.call_id,
+            "output": row.output_json if row.output_json is not None else "",
         }
     if row.type == "web_search_call":
         content = row.content_json if isinstance(row.content_json, dict) else {}
@@ -744,6 +788,11 @@ def _content_json_from_item(item: dict[str, Any]) -> Any:
             "output_format": item.get("output_format") or "png",
             "seed": item.get("seed"),
         }
+    if item.get("type") == "custom_tool_call":
+        content = {"input": item.get("input") or ""}
+        if item.get("namespace") is not None:
+            content["namespace"] = item.get("namespace")
+        return content
     return item.get("content", [])
 
 
