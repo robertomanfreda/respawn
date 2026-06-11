@@ -14,6 +14,7 @@ from src.services.include_expansions import REASONING_ENCRYPTED_CONTENT, validat
 from src.services.model_capabilities import reasoning_efforts_for_model
 from src.services.response_history_builder import content_to_text
 from src.services.reasoning_summaries import DeterministicReasoningSummaryProvider, ReasoningSummaryProvider, estimate_text_tokens
+from src.services.tool_call_arguments import arguments_to_string
 
 
 UNSUPPORTED_FIELDS = {
@@ -509,7 +510,7 @@ def _function_call_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, 
         "type": "function_call",
         "call_id": str(item["call_id"]),
         "name": str(item["name"]),
-        "arguments": _arguments_to_string(item.get("arguments", "{}")),
+        "arguments": arguments_to_string(item.get("arguments", "{}")),
         "status": item.get("status", "completed"),
     }
     if item.get("namespace") is not None:
@@ -1022,7 +1023,7 @@ def _validate_function_call_item(item: dict[str, Any], *, param: str) -> None:
     if item.get("namespace") is not None:
         _validate_tool_name(item.get("namespace"), param=f"{param}.namespace")
     arguments = item.get("arguments", "{}")
-    arguments_string = _arguments_to_string(arguments)
+    arguments_string = arguments_to_string(arguments)
     _validate_json_arguments(arguments_string, param=f"{param}.arguments")
 
 
@@ -1070,13 +1071,6 @@ def _validate_reasoning_item(item: dict[str, Any], *, param: str) -> None:
 def _validate_tool_name(name: Any, *, param: str) -> None:
     if not isinstance(name, str) or not FUNCTION_TOOL_NAME_RE.fullmatch(name):
         raise OpenAIError("Function tool names must be 1-64 characters and contain only letters, numbers, underscores, and hyphens.", param=param, code="invalid_tool")
-
-
-def _arguments_to_string(arguments: Any) -> str:
-    if isinstance(arguments, str):
-        return arguments
-    return json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
-
 
 def _validate_json_arguments(arguments: str, *, param: str) -> None:
     try:

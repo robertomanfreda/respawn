@@ -14,6 +14,7 @@ from src.config import get_settings
 from src.main import create_app
 from src.services.context_management import unseal_compaction_content
 from src.services.reasoning_encryption import unseal_reasoning_content
+from tests.helpers import backend_tool_names
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "incomplete"}
@@ -41,14 +42,6 @@ def _upload_text_file(client, *, filename: str = "facts.txt", text: str = "Respa
         data={"purpose": "user_data"},
         files={"file": (filename, text.encode(), "text/plain")},
     )
-
-
-def _backend_tool_names(payload: dict) -> list[str]:
-    names = []
-    for tool in payload.get("tools") or []:
-        function = tool.get("function") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else {}
-        names.append(function.get("name"))
-    return names
 
 
 def test_list_models(client):
@@ -153,7 +146,7 @@ def test_response_request_settings_round_trip_through_retrieve(client):
     payload = {
         "model": "gpt-oss-120b",
         "input": "shape settings",
-        "metadata": {"ticket": "phase-1"},
+        "metadata": {"ticket": "settings-roundtrip"},
         "temperature": 0.2,
         "top_p": 0.9,
         "max_output_tokens": 16,
@@ -166,7 +159,7 @@ def test_response_request_settings_round_trip_through_retrieve(client):
     retrieved = client.get(f"/v1/responses/{created['id']}").json()
 
     for body in (created, retrieved):
-        assert body["metadata"] == {"ticket": "phase-1"}
+        assert body["metadata"] == {"ticket": "settings-roundtrip"}
         assert body["temperature"] == 0.2
         assert body["top_p"] == 0.9
         assert body["max_output_tokens"] == 16
@@ -320,7 +313,7 @@ def test_prompt_template_render_variables_and_versions(client):
             "id": "pmpt_integration",
             "version": "1",
             "input": "Prompt template marker word {{word}}.",
-            "metadata": {"phase": "12"},
+            "metadata": {"case": "prompt-template"},
         },
     )
     assert first_template.status_code == 200
@@ -1203,7 +1196,7 @@ def test_builtin_tools_are_explicitly_unsupported(client):
     assert response.json()["error"]["code"] == "unsupported_parameter"
     assert response.json()["error"]["param"] == "tools.0.type"
 
-    codex_like_response = client.post(
+    agent_like_response = client.post(
         "/v1/responses",
         json={
             "input": "search",
@@ -1220,9 +1213,9 @@ def test_builtin_tools_are_explicitly_unsupported(client):
         },
     )
 
-    assert codex_like_response.status_code == 400
-    assert codex_like_response.json()["error"]["code"] == "unsupported_parameter"
-    assert codex_like_response.json()["error"]["param"] == "tools.1.type"
+    assert agent_like_response.status_code == 400
+    assert agent_like_response.json()["error"]["code"] == "unsupported_parameter"
+    assert agent_like_response.json()["error"]["param"] == "tools.1.type"
 
 
 def test_web_search_required_returns_call_citations_and_retrieves(web_search_client):
@@ -1299,7 +1292,7 @@ def test_web_search_followup_is_text_only_when_image_generation_is_available(web
     assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
 
     payloads = web_search_and_image_generation_client.app.state.backend.payloads
-    assert {"respawn_web_search", "respawn_image_generation"} <= set(_backend_tool_names(payloads[0]))
+    assert {"respawn_web_search", "respawn_image_generation"} <= set(backend_tool_names(payloads[0]))
     assert "tools" not in payloads[1]
     assert "tool_choice" not in payloads[1]
 
@@ -1351,7 +1344,7 @@ def test_web_search_filters_store_false_and_timeout(web_search_client):
     assert timeout.json()["error"]["code"] == "web_search_timeout"
 
 
-def test_codex_like_namespace_plus_web_search_passes_web_search_validation(web_search_client):
+def test_agent_like_namespace_plus_web_search_passes_web_search_validation(web_search_client):
     accepted = web_search_client.post(
         "/v1/responses",
         json={
@@ -1501,8 +1494,8 @@ def test_image_generation_followup_accepts_prior_web_search_call_item(image_gene
     assert body["output"][0]["status"] == "completed"
 
 
-def test_image_generation_tool_choice_none_and_codex_like_declaration_do_not_generate(image_generation_client):
-    codex_like = image_generation_client.post(
+def test_image_generation_tool_choice_none_and_agent_like_declaration_do_not_generate(image_generation_client):
+    agent_like = image_generation_client.post(
         "/v1/responses",
         json={
             "input": "List files in this repository",
@@ -1510,8 +1503,8 @@ def test_image_generation_tool_choice_none_and_codex_like_declaration_do_not_gen
             "tools": [{"type": "image_generation"}],
         },
     )
-    assert codex_like.status_code == 200
-    assert all(item["type"] != "image_generation_call" for item in codex_like.json()["output"])
+    assert agent_like.status_code == 200
+    assert all(item["type"] != "image_generation_call" for item in agent_like.json()["output"])
     assert image_generation_client.app.state.image_generation_backend.requests == []
 
     disabled_by_choice = image_generation_client.post(

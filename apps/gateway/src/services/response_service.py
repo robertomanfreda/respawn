@@ -61,6 +61,7 @@ from src.services.multimodal_inputs import prepare_multimodal_request
 from src.services.prompt_cache import PromptCache, PromptCacheMatch
 from src.services.prompt_templates import PromptTemplateRenderer
 from src.services.structured_outputs import repair_instruction, schema_from_response_format, validate_text_against_schema
+from src.services.tool_call_arguments import arguments_to_string
 from src.services.responses_compat import (
     estimate_input_tokens,
     estimate_text_tokens,
@@ -936,9 +937,7 @@ class ResponseService:
             if web_search is not None:
                 output.append(web_search.output_item)
             output.append(image_generation.output_item)
-            if plan.compaction_item is not None:
-                output.insert(0, {**plan.compaction_item, "status": "completed"})
-            return output, usage, "completed", None
+            return self._with_compaction_item(output, plan.compaction_item), usage, "completed", None
         payload = self._payload(model=model, request=plan.request, chain=plan.chain)
         self._inject_web_search_context(payload, web_search)
         if web_search is not None:
@@ -968,21 +967,17 @@ class ResponseService:
             usage = _combine_usage(first_usage, self._usage(result, followup_cache_match))
             response_status, incomplete_details = self._completion_status(result.finish_reason)
             output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches)
-            if plan.compaction_item is not None:
-                output.insert(0, {**plan.compaction_item, "status": "completed"})
             self._record_token_usage(model, usage)
             self.prompt_cache.store(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-            return output, usage, response_status, incomplete_details
+            return self._with_compaction_item(output, plan.compaction_item), usage, response_status, incomplete_details
         image_generations = await self._execute_internal_image_generation_tool_calls(result.tool_calls, plan.request, response_id=response_id)
         result = result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)})
         usage = self._usage(result, cache_match)
         response_status, incomplete_details = self._completion_status(result.finish_reason)
         output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches, image_generations=image_generations)
-        if plan.compaction_item is not None:
-            output.insert(0, {**plan.compaction_item, "status": "completed"})
         self._record_token_usage(model, usage)
         self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-        return output, usage, response_status, incomplete_details
+        return self._with_compaction_item(output, plan.compaction_item), usage, response_status, incomplete_details
 
     async def _plan_context(
         self,
@@ -1033,8 +1028,8 @@ class ResponseService:
 
     def _record_compaction_metrics(self, *, model: str, mode: str, before: int, after: int) -> None:
         CONTEXT_COMPACTIONS.labels(model=model, mode=mode).inc()
-        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, phase="before").inc(before)
-        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, phase="after").inc(after)
+        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, stage="before").inc(before)
+        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, stage="after").inc(after)
         CONTEXT_TRUNCATIONS.labels(model=model, reason="context_window").inc(0)
         CONTEXT_OVERFLOWS.labels(model=model, truncation="disabled").inc(0)
         ratio = after / before if before > 0 else 0.0
@@ -1050,6 +1045,11 @@ class ResponseService:
         PROMPT_CACHE_TOKENS.labels(kind="cached").inc(cache_match.cached_tokens)
         ratio = cache_match.cached_tokens / cache_match.input_tokens if cache_match.input_tokens > 0 else 0.0
         PROMPT_CACHE_HIT_RATIO.labels(retention=cache_match.retention).set(ratio)
+
+    def _with_compaction_item(self, output: list[dict[str, Any]], compaction_item: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if compaction_item is None:
+            return output
+        return [{**compaction_item, "status": "completed"}, *output]
 
     def _schedule_background_response(self, response_id: str, tenant_id: str | None) -> None:
         if self.session_factory is None or self.background_tasks is None:
@@ -1411,10 +1411,7 @@ class ResponseService:
         return [{"type": "input_text", "text": str(content)}]
 
     def _arguments_to_string(self, arguments: Any) -> str:
-        if isinstance(arguments, str):
-            value = arguments
-        else:
-            value = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
+        value = arguments_to_string(arguments)
         try:
             json.loads(value or "{}")
         except json.JSONDecodeError as exc:

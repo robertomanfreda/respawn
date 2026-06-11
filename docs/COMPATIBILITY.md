@@ -6,7 +6,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 
 ## Summary
 
-- Manifest version: `phase-18`
+- Manifest version: `compat-18`
 - Manifest source: `docs/COMPATIBILITY.md`
 - Total tracked features: `128`
 - Supported or conditionally supported: `121`
@@ -77,7 +77,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `request.metadata` | metadata | `supported` | `responses.shape.metadata_retrieve` |  |
 | `request.service_tier` | service_tier | `supported_local` | `responses.shape.metadata_retrieve` | Accepted and round-tripped as local metadata; it does not change local scheduling. |
 | `request.safety_identifier` | safety_identifier | `supported_local` | `responses.shape.metadata_retrieve` | Accepted and round-tripped for SDK shape compatibility. |
-| `request.client_metadata` | client_metadata | `supported_local` | `responses.shape.metadata_retrieve` | Accepted as opaque client telemetry metadata for Codex/SDK compatibility; stored with the request snapshot but not forwarded to the backend or exposed on response objects. |
+| `request.client_metadata` | client_metadata | `supported_local` | `responses.shape.metadata_retrieve` | Accepted as opaque client telemetry metadata for agent/SDK compatibility; stored with the request snapshot but not forwarded to the backend or exposed on response objects. |
 | `request.prompt_templates` | prompt={id, version, variables} | `supported_local` | `responses.prompt.template_render` | Respawn supports local API-managed prompt templates under /v1/responses/prompts. Templates render instructions/input with {{variable}} placeholders before local context planning and backend calls. |
 | `request.prompt_template_errors` | missing prompt templates and missing prompt variables | `supported_local` | `responses.prompt.template_missing` | Missing templates and missing variables return deterministic OpenAI-shaped errors. |
 | `request.idempotency_key` | Idempotency-Key request header for POST requests | `supported_local` | `sdk.errors` | Single-instance in-memory replay cache. Reusing a key with a different body returns 409 idempotency_conflict. |
@@ -112,7 +112,7 @@ The matrix describes what Respawn actually supports today: one Respawn instance 
 | `io.output_text_file_annotations` | output_text annotations for local input_file citations | `supported_local` | `responses.include.annotations` | When a response uses local input_file extraction, output_text carries OpenAI-shaped file_citation annotations pointing at local response artifact IDs. |
 | `io.web_search_call_items` | web_search_call output items | `supported_local` | `responses.web_search.basic` | When local web search runs, Respawn emits an OpenAI-shaped `web_search_call` item before the final assistant message. |
 | `io.image_generation_call_items` | image_generation_call output items with base64 image result | `supported_local` | `responses.image_generation.basic` | When local image generation runs, Respawn emits an OpenAI-shaped `image_generation_call` item containing the generated PNG as base64. |
-| `io.input_audio_unsupported` | input_audio | `unsupported` | `responses.multimodal.input_audio_unsupported` | Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription phase exists. |
+| `io.input_audio_unsupported` | input_audio | `unsupported` | `responses.multimodal.input_audio_unsupported` | Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription implementation exists. |
 | `io.built_in_tool_items` | built-in tool call output items | `unsupported` | `responses.tools.unsupported_builtin_tools` | Built-in/internal tool execution remains out of scope even after function-tool protocol support. |
 
 ### Response Object

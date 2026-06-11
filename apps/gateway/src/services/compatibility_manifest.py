@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 
-MANIFEST_VERSION = "phase-18"
+MANIFEST_VERSION = "compat-18"
 MANIFEST_SOURCE = "docs/COMPATIBILITY.md"
 
 
@@ -355,7 +355,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["sdk", "state"],
         "benchmark_case": "responses.shape.metadata_retrieve",
-        "notes": "Accepted as opaque client telemetry metadata for Codex/SDK compatibility; it is stored with the request snapshot but is not forwarded to the model backend or exposed on response objects.",
+        "notes": "Accepted as opaque client telemetry metadata for agent/SDK compatibility; it is stored with the request snapshot but is not forwarded to the model backend or exposed on response objects.",
     },
     {
         "id": "request.prompt_templates",
@@ -730,7 +730,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "unsupported",
         "tags": ["multimodal"],
         "benchmark_case": "responses.multimodal.input_audio_unsupported",
-        "notes": "Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription phase exists.",
+        "notes": "Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription implementation exists.",
     },
     {
         "id": "io.built_in_tool_items",

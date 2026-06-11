@@ -1,4 +1,4 @@
-# Respawn
+![Respawn cover](static/respawn-cover.png)
 
 Respawn is a local OpenAI-shaped API gateway for self-hosted LLM backends.
 

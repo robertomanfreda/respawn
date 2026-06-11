@@ -45,6 +45,11 @@ SUPPORTED_WEB_SEARCH_BACKENDS = {"mock", "searxng"}
 SUPPORTED_IMAGE_GENERATION_BACKENDS = {"mock", "automatic1111", "comfyui"}
 
 
+def _unsupported_backend_message(setting_name: str, requested: str, supported_values: set[str]) -> str:
+    supported = ", ".join(sorted(supported_values))
+    return f"Unsupported {setting_name} '{requested}'. Supported values: {supported}."
+
+
 def build_backend(settings):
     """Create the configured model backend and fail fast on typos."""
     backend_name = settings.model_backend.lower()
@@ -52,8 +57,7 @@ def build_backend(settings):
         return OllamaBackend(settings.ollama_base_url, settings.backend_timeout_seconds)
     if backend_name == "mock":
         return MockBackend(settings.default_model)
-    supported = ", ".join(sorted(SUPPORTED_MODEL_BACKENDS))
-    raise ValueError(f"Unsupported MODEL_BACKEND '{settings.model_backend}'. Supported values: {supported}.")
+    raise ValueError(_unsupported_backend_message("MODEL_BACKEND", settings.model_backend, SUPPORTED_MODEL_BACKENDS))
 
 
 def build_web_search_backend(settings):
@@ -69,8 +73,7 @@ def build_web_search_backend(settings):
             timeout_seconds=settings.web_search_timeout_seconds,
             user_agent=settings.web_search_user_agent,
         )
-    supported = ", ".join(sorted(SUPPORTED_WEB_SEARCH_BACKENDS))
-    raise ValueError(f"Unsupported WEB_SEARCH_BACKEND '{settings.web_search_backend}'. Supported values: {supported}.")
+    raise ValueError(_unsupported_backend_message("WEB_SEARCH_BACKEND", settings.web_search_backend, SUPPORTED_WEB_SEARCH_BACKENDS))
 
 
 def build_image_generation_backend(settings) -> ImageGenerationBackend | None:
@@ -92,8 +95,7 @@ def build_image_generation_backend(settings) -> ImageGenerationBackend | None:
             timeout_seconds=settings.image_generation_timeout_seconds,
             model=settings.image_generation_model,
         )
-    supported = ", ".join(sorted(SUPPORTED_IMAGE_GENERATION_BACKENDS))
-    raise ValueError(f"Unsupported IMAGE_GENERATION_BACKEND '{settings.image_generation_backend}'. Supported values: {supported}.")
+    raise ValueError(_unsupported_backend_message("IMAGE_GENERATION_BACKEND", settings.image_generation_backend, SUPPORTED_IMAGE_GENERATION_BACKENDS))
 
 
 @asynccontextmanager

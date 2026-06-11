@@ -3,6 +3,7 @@ from typing import Any
 import json
 
 from src.schemas.errors import OpenAIError
+from src.services.tool_call_arguments import arguments_to_string
 
 
 TOOL_ITEM_TYPES = {"function_call", "function_call_output", "tool_result"}
@@ -131,7 +132,7 @@ def _chat_tool_call(item: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": backend_name,
-            "arguments": _arguments_to_string(item.get("arguments", "{}")),
+            "arguments": arguments_to_string(item.get("arguments", "{}")),
         },
     }
 
@@ -189,13 +190,6 @@ def function_output_to_text(output: Any) -> str:
     if isinstance(output, str):
         return output
     return json.dumps(output, separators=(",", ":"), ensure_ascii=False)
-
-
-def _arguments_to_string(arguments: Any) -> str:
-    if isinstance(arguments, str):
-        return arguments
-    return json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
-
 
 def content_to_message_content(content: Any) -> Any:
     if isinstance(content, list) and any(isinstance(part, dict) and part.get("type") in {"input_image", "input_file"} for part in content):

@@ -1,6 +1,7 @@
 import json
 
 from src.adapters.mock_control import mock_metadata
+from tests.helpers import backend_tool_names
 
 
 def parse_sse_events(text):
@@ -18,14 +19,6 @@ def parse_sse_events(text):
                 event["data"] = json.loads(line.removeprefix("data: ").strip())
         events.append(event)
     return events
-
-
-def backend_tool_names(payload):
-    names = []
-    for tool in payload.get("tools") or []:
-        function = tool.get("function") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else {}
-        names.append(function.get("name"))
-    return names
 
 
 def test_streaming_event_lifecycle(client):
