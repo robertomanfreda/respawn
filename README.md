@@ -326,9 +326,13 @@ function-call shape, emits `custom_tool_call`, stores/replays the item, and
 accepts `custom_tool_call_output` in follow-up requests. Respawn never executes
 function or custom tools. Query-style `web_search` and
 text-to-image `image_generation` are available only when explicitly enabled and
-configured. Hosted tools, shell, filesystem, git, workspace, browser, code
-interpreter, MCP hosting, and similar execution surfaces are explicitly out of
-scope.
+configured. In auto mode, local `web_search` and `image_generation` are exposed
+to the backend whenever the request includes the tool, matching OpenAI's
+Responses tool availability model; explicit `tool_choice` can still require
+tool use where supported. Respawn adds a general tool-use policy for local
+backends, but it does not classify prompt text with keyword rules. Hosted tools,
+shell, filesystem, git, workspace, browser, code interpreter, MCP hosting, and
+similar execution surfaces are explicitly out of scope.
 
 ### Multimodal And Files
 

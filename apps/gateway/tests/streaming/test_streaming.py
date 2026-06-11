@@ -208,7 +208,8 @@ def test_streaming_web_search_followup_is_text_only_with_image_generation_availa
     assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
 
     payloads = web_search_and_image_generation_client.app.state.backend.payloads
-    assert {"respawn_web_search", "respawn_image_generation"} <= set(backend_tool_names(payloads[0]))
+    assert "respawn_web_search" in backend_tool_names(payloads[0])
+    assert "respawn_image_generation" in backend_tool_names(payloads[0])
     assert "tools" not in payloads[1]
     assert "tool_choice" not in payloads[1]
 
@@ -241,6 +242,7 @@ def test_streaming_image_generation_output_item_events(image_generation_client):
         json={
             "input": "Generate image of a tiny stream house",
             "tools": [{"type": "image_generation", "quality": "low"}],
+            "tool_choice": {"type": "image_generation"},
             "metadata": mock_metadata(tool_call="image_generation"),
             "stream": True,
             "store": True,

@@ -33,6 +33,9 @@ Main areas:
 - Never solve routing, intent, or compatibility problems by stubbing special
   words, prompt phrases, or one-off cases. Solutions must be general, explicit,
   and correct across equivalent inputs.
+- Do not classify prompts with keyword lists, regex phrase matching, or
+  language-specific trigger words. Prefer protocol fields, typed request state,
+  explicit configuration, or documented unsupported behavior.
 - Do not leave planning-era labels, temporary wave names, or numbered delivery
   markers in code, docs, tests, metrics, fixtures, or public examples. Use stable
   domain names that describe the behavior.

@@ -66,6 +66,7 @@ from src.services.structured_outputs import repair_instruction, schema_from_resp
 from src.services.tool_call_arguments import arguments_to_string
 from src.services.responses_compat import (
     CUSTOM_TOOL_INPUT_FIELD,
+    TOOL_USE_POLICY_PREFIX,
     estimate_input_tokens,
     estimate_text_tokens,
     backend_function_tools,
@@ -83,6 +84,7 @@ from src.services.responses_compat import (
     is_internal_web_search_tool_call,
     stream_obfuscation_enabled,
     tool_choice_instruction,
+    tool_use_policy_instruction,
     validate_function_call_outputs_match,
     validate_reasoning_capabilities,
     validate_text_responses_request,
@@ -1105,6 +1107,9 @@ class ResponseService:
         instruction = tool_choice_instruction(request)
         if instruction:
             messages.insert(0, {"role": "system", "content": instruction})
+        policy_instruction = tool_use_policy_instruction(request)
+        if policy_instruction:
+            messages.insert(0, {"role": "system", "content": policy_instruction})
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -1112,7 +1117,7 @@ class ResponseService:
             "top_p": request.top_p,
             "max_tokens": request.max_output_tokens or self.settings.max_output_tokens_default,
         }
-        tools = backend_function_tools(request)
+        tools = backend_function_tools(request, chain)
         if request.tool_choice == "none":
             tools = []
         if tools:
@@ -1713,6 +1718,17 @@ class ResponseService:
         payload.pop("tool_choice", None)
         payload.pop("parallel_tool_calls", None)
         payload.pop("max_tool_calls", None)
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            payload["messages"] = [
+                message
+                for message in messages
+                if not (
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and str(message.get("content", "")).startswith(TOOL_USE_POLICY_PREFIX)
+                )
+            ]
 
     def _validate_text_followup_tool_calls(self, tool_calls: list[dict[str, Any]], model: str) -> None:
         if tool_calls:

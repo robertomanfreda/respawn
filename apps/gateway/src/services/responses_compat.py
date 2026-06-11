@@ -36,6 +36,7 @@ WEB_SEARCH_CONTEXT_SIZES = {"low", "medium", "high"}
 WEB_SEARCH_TOOL_FIELDS = {"type", "search_context_size", "filters", "user_location", "external_web_access"}
 WEB_SEARCH_FILTER_FIELDS = {"allowed_domains", "blocked_domains"}
 WEB_SEARCH_MAX_DOMAINS = 100
+TOOL_USE_POLICY_PREFIX = "Respawn tool-use policy:"
 CUSTOM_TOOL_TYPE = "custom"
 CUSTOM_TOOL_INPUT_FIELD = "input"
 IMAGE_GENERATION_TOOL_TYPE = "image_generation"
@@ -217,7 +218,7 @@ def estimate_input_tokens(request: ResponseRequest, chain: list[dict[str, Any]] 
     return _estimate_tokens("\n".join(part for part in parts if part))
 
 
-def backend_function_tools(request: ResponseRequest) -> list[dict[str, Any]]:
+def backend_function_tools(request: ResponseRequest, chain: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     tools = _normalized_backend_tools(request.tools)
     tool_choice = request.tool_choice
     backend_tools: list[dict[str, Any]]
@@ -231,7 +232,7 @@ def backend_function_tools(request: ResponseRequest) -> list[dict[str, Any]]:
 
     if _include_internal_web_search_tool(request):
         backend_tools.append(_backend_web_search_tool())
-    if _include_internal_image_generation_tool(request):
+    if _include_internal_image_generation_tool(request, chain=chain):
         backend_tools.append(_backend_image_generation_tool())
     return backend_tools
 
@@ -334,6 +335,26 @@ def tool_choice_instruction(request: ResponseRequest) -> str | None:
     if request.parallel_tool_calls is False:
         return "If you call a function, call at most one function in this turn."
     return None
+
+
+def tool_use_policy_instruction(request: ResponseRequest) -> str | None:
+    if isinstance(request.tool_choice, dict) and request.tool_choice.get("type") == "allowed_tools":
+        return None
+    policies: list[str] = []
+    if web_search_requested(request) and not web_search_disabled_by_choice(request) and not web_search_required(request):
+        policies.append(
+            "The web_search tool is available in auto mode. Call respawn_web_search only when the latest user request needs current, recent, external, or source-backed information. "
+            "For stable general knowledge, coding tasks, file operations, or requests that do not need external sources, answer normally without calling web_search."
+        )
+    if image_generation_requested(request) and not image_generation_disabled_by_choice(request) and not image_generation_required(request):
+        policies.append(
+            "The image_generation tool is available in auto mode. Call respawn_image_generation only when the latest user request asks to create, edit, or revise visual output. "
+            "For ordinary questions, explanations, coding tasks, file operations, or non-visual requests, answer normally without calling image_generation. "
+            "If you do not call image_generation, do not claim that an image was generated and do not show an image placeholder."
+        )
+    if not policies:
+        return None
+    return f"{TOOL_USE_POLICY_PREFIX}\n" + "\n".join(policies)
 
 
 def function_call_output_item(item_id: str, *, call_id: str, output: Any, status: str = "completed") -> dict[str, Any]:
@@ -896,7 +917,7 @@ def _backend_image_generation_tool() -> dict[str, Any]:
     }
 
 
-def _include_internal_image_generation_tool(request: ResponseRequest) -> bool:
+def _include_internal_image_generation_tool(request: ResponseRequest, *, chain: list[dict[str, Any]] | None = None) -> bool:
     if not image_generation_requested(request) or image_generation_disabled_by_choice(request):
         return False
     if image_generation_required(request):

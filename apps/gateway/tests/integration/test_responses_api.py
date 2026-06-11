@@ -1293,9 +1293,135 @@ def test_web_search_followup_is_text_only_when_image_generation_is_available(web
     assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
 
     payloads = web_search_and_image_generation_client.app.state.backend.payloads
-    assert {"respawn_web_search", "respawn_image_generation"} <= set(backend_tool_names(payloads[0]))
+    assert "respawn_web_search" in backend_tool_names(payloads[0])
+    assert "respawn_image_generation" in backend_tool_names(payloads[0])
+    assert payloads[0]["messages"][0]["content"].startswith("Respawn tool-use policy:")
+    assert "answer normally without calling web_search" in payloads[0]["messages"][0]["content"]
     assert "tools" not in payloads[1]
     assert "tool_choice" not in payloads[1]
+    assert all(not message.get("content", "").startswith("Respawn tool-use policy:") for message in payloads[1]["messages"] if message.get("role") == "system")
+
+
+def test_image_generation_auto_keeps_tool_available_after_prior_image(image_generation_client):
+    first = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of an auto tiny house",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": True,
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["output"][0]["type"] == "image_generation_call"
+
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first.json()["id"],
+            "input": "Continue with a normal text answer.",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert all(item["type"] != "image_generation_call" for item in body["output"])
+    assert len(image_generation_client.app.state.image_generation_backend.requests) == 1
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+    assert "do not show an image placeholder" in payload["messages"][0]["content"]
+
+
+def test_image_generation_auto_can_generate_consecutive_images(image_generation_client):
+    first = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of an auto tiny house",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": True,
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["output"][0]["type"] == "image_generation_call"
+
+    second = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first.json()["id"],
+            "input": "Generate image of a tiny mouse",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": False,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert len(image_generation_client.app.state.image_generation_backend.requests) == 2
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+
+
+def test_image_generation_auto_reexposes_after_intervening_text_context(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "revised_prompt": "a toad",
+                    "result": "base64-png",
+                    "size": "512x512",
+                },
+                {"type": "message", "role": "user", "content": "What is Kubernetes?"},
+                {"type": "message", "role": "assistant", "content": "Kubernetes orchestrates containers."},
+                {"type": "message", "role": "user", "content": "Generate image of a dog"},
+            ],
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert len(image_generation_client.app.state.image_generation_backend.requests) == 1
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+
+
+def test_image_generation_auto_keeps_tool_after_empty_assistant_after_prior_image_context(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "revised_prompt": "a dog",
+                    "result": "base64-png",
+                    "size": "512x512",
+                },
+                {"type": "message", "role": "assistant", "content": ""},
+                {"type": "message", "role": "user", "content": "What is Kubernetes?"},
+            ],
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert all(item["type"] != "image_generation_call" for item in body["output"])
+    assert image_generation_client.app.state.image_generation_backend.requests == []
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
 
 
 def test_web_search_tool_choice_none_does_not_call_provider(web_search_client):

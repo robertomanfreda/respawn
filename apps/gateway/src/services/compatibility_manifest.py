@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 
-MANIFEST_VERSION = "compat-19"
+MANIFEST_VERSION = "compat-20"
 MANIFEST_SOURCE = "docs/COMPATIBILITY.md"
 
 
@@ -250,7 +250,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["tools", "web_search"],
         "benchmark_case": "responses.web_search.basic",
-        "notes": "Respawn executes query-style local web search through the configured provider when WEB_SEARCH_ENABLED=true.",
+        "notes": "Respawn executes query-style local web search through the configured provider when WEB_SEARCH_ENABLED=true. In auto mode, the local web search tool is exposed whenever the request includes it, with a general tool-use policy for local backend selection.",
     },
     {
         "id": "request.web_search_filters",
@@ -277,7 +277,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["tools", "image_generation"],
         "benchmark_case": "responses.image_generation.basic",
-        "notes": "Respawn executes text-to-image generation through the configured local image backend, including ComfyUI, when IMAGE_GENERATION_ENABLED=true.",
+        "notes": "Respawn executes text-to-image generation through the configured local image backend, including ComfyUI, when IMAGE_GENERATION_ENABLED=true. In auto mode, the local image tool is exposed whenever the request includes it, matching OpenAI's Responses tool availability model; local backend tool-selection quality depends on the configured model.",
     },
     {
         "id": "request.image_generation_disabled_error",
@@ -295,7 +295,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.tool_choice_forced_function",
-        "notes": "Function/custom choices are mapped to the configured backend where possible. web_search and image_generation required/none choices are enforced locally before backend generation.",
+        "notes": "Function/custom choices are mapped to the configured backend where possible. web_search required/none choices are enforced locally before backend generation. image_generation required/none choices are enforced locally; auto mode leaves the tool available and does not classify prompt text in the gateway.",
     },
     {
         "id": "request.parallel_and_max_tool_calls",
