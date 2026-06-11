@@ -55,18 +55,18 @@ def test_python_sdk_responses_files_headers_and_pagination(tmp_path, monkeypatch
                 {"role": "user", "content": "first SDK item"},
                 {"role": "user", "content": "second SDK item"},
             ],
-            metadata={"sdk": "phase-14"},
+            metadata={"sdk": "contract-shape"},
             text={"format": {"type": "text"}},
-            extra_headers={"x-request-id": "req_phase14_sdk"},
+            extra_headers={"x-request-id": "req_sdk_contract"},
         )
         created = raw.parse()
-        assert raw.headers["x-request-id"] == "req_phase14_sdk"
-        assert created._request_id == "req_phase14_sdk"
+        assert raw.headers["x-request-id"] == "req_sdk_contract"
+        assert created._request_id == "req_sdk_contract"
         assert RESPONSE_SNAPSHOT_KEYS.issubset(created.model_dump().keys())
 
         retrieved = sdk.responses.retrieve(created.id)
         assert retrieved.id == created.id
-        assert retrieved.metadata == {"sdk": "phase-14"}
+        assert retrieved.metadata == {"sdk": "contract-shape"}
 
         first_page = sdk.responses.input_items.list(created.id, order="asc", limit=1)
         assert len(first_page.data) == 1
@@ -77,10 +77,10 @@ def test_python_sdk_responses_files_headers_and_pagination(tmp_path, monkeypatch
         second_page = sdk.responses.input_items.list(created.id, order="asc", limit=1, after=first_page.data[0].id)
         assert second_page.data[0].id != first_page.data[0].id
 
-        uploaded = sdk.files.create(file=("phase14.txt", b"phase 14 sdk file marker"), purpose="user_data")
+        uploaded = sdk.files.create(file=("sdk-contract.txt", b"sdk contract file marker"), purpose="user_data")
         assert uploaded.id.startswith("file_")
-        assert sdk.files.retrieve(uploaded.id).filename == "phase14.txt"
-        assert "phase 14" in sdk.files.content(uploaded.id).text
+        assert sdk.files.retrieve(uploaded.id).filename == "sdk-contract.txt"
+        assert "sdk contract" in sdk.files.content(uploaded.id).text
         file_page = sdk.files.list(order="asc", limit=1)
         file_page_body = file_page.model_dump()
         assert file_page_body["first_id"] == uploaded.id
@@ -96,7 +96,7 @@ def test_python_sdk_responses_files_headers_and_pagination(tmp_path, monkeypatch
 
 def test_python_sdk_stream_background_and_function_followup(tmp_path, monkeypatch):
     with sdk_server(tmp_path, monkeypatch) as sdk:
-        with sdk.responses.stream(model="gpt-oss-120b", input="sdk stream phase 14") as stream:
+        with sdk.responses.stream(model="gpt-oss-120b", input="sdk stream contract") as stream:
             events = list(stream)
         event_types = [event.type for event in events]
         assert "response.output_text.delta" in event_types

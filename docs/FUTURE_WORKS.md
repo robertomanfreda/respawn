@@ -1,9 +1,9 @@
-# Respawn Future Work
+# Respawn Backlog
 
 This document tracks only candidate work that is not implemented today. The
 source of truth for current support remains `docs/COMPATIBILITY.md`.
 
-Implemented features should not stay here as roadmap residue. Move future work
+Implemented features should not stay here as planning residue. Move items
 into the compatibility matrix only after it has implementation, tests or
 benchmark coverage, and OpenAI-shaped failure behavior for unsupported paths.
 

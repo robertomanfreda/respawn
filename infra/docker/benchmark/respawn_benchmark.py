@@ -448,7 +448,7 @@ def case_responses_shape_blocking_text() -> str:
         "/v1/responses",
         {
             "model": MODEL,
-            "input": "Respawn benchmark Phase 1 text shape. Reply with one short sentence.",
+            "input": "Respawn benchmark basic text shape. Reply with one short sentence.",
             "text": {"format": {"type": "text"}},
             "temperature": 0,
             "top_p": 1,
@@ -471,8 +471,8 @@ def case_responses_shape_blocking_text() -> str:
 def case_responses_shape_metadata_retrieve() -> str:
     payload = {
         "model": MODEL,
-        "input": "Respawn benchmark Phase 1 metadata retrieve. Reply briefly.",
-        "metadata": {"phase": "one", "kind": "retrieve"},
+        "input": "Respawn benchmark metadata retrieve. Reply briefly.",
+        "metadata": {"case": "metadata-retrieve", "kind": "retrieve"},
         "temperature": 0,
         "top_p": 1,
         "max_output_tokens": completion_output_tokens(),
@@ -501,7 +501,7 @@ def case_responses_shape_max_output_incomplete() -> str:
         "/v1/responses",
         {
             "model": MODEL,
-            "input": "Respawn benchmark Phase 1 max output behavior. Produce several words.",
+            "input": "Respawn benchmark max output behavior. Produce several words.",
             "max_output_tokens": 1,
             "store": False,
         },

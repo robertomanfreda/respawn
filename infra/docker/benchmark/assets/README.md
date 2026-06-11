@@ -1,6 +1,6 @@
 # Benchmark Assets
 
-These tiny files support Phase 8 multimodal validation.
+These tiny files support multimodal validation.
 
 The benchmark asset server exposes deterministic local URL-based image/file
 cases without relying on public internet resources.

@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 import json
+import logging
 import time
 from typing import Any
 
@@ -8,10 +9,12 @@ from fastapi.responses import StreamingResponse
 
 from src.adapters.base import ModelBackend
 from src.observability.metrics import CHAT_COMPLETION_LATENCY, CHAT_COMPLETIONS, MODEL_TOKEN_USAGE
+from src.observability.model_io import log_model_request, log_model_response, log_model_stream_chunk
 from src.security.auth import tenant_id
 from src.services.id_generator import generate_id
 
 router = APIRouter(prefix="/v1/chat/completions", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=None)
@@ -33,7 +36,9 @@ async def chat_completions(
     status = "failed"
     started_at = time.perf_counter()
     try:
+        log_model_request(logger, api="chat_completions", phase="blocking", payload=backend_payload)
         result = await request.app.state.backend.create_chat_completion(backend_payload)
+        log_model_response(logger, api="chat_completions", phase="blocking", result=result)
         _record_token_usage(model, result.usage)
         status = "completed"
         return {
@@ -77,7 +82,9 @@ async def _chat_completion_stream(payload: dict[str, Any], backend: ModelBackend
         )
 
         usage: dict[str, int] = {}
+        log_model_request(logger, api="chat_completions", phase="stream", payload=payload)
         async for chunk in backend.create_chat_completion_stream(payload):
+            log_model_stream_chunk(logger, api="chat_completions", phase="stream", chunk=chunk)
             if chunk.get("type") == "delta":
                 yield _chat_stream_event(
                     {

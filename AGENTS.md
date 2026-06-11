@@ -22,6 +22,8 @@ Main areas:
 - Read the surrounding code before changing behavior. Prefer existing patterns
   over new abstractions.
 - Keep changes scoped. Do not silently refactor unrelated code.
+- Keep code clean by default: prefer small named helpers, shared parsing and
+  validation functions, and reusable fixtures over repeated inline logic.
 - Treat `infra/docker/env.example` as publishable defaults. Treat
   `infra/docker/env` as ignored local overrides only.
 - Do not commit secrets, model blobs, databases, benchmark result files, or local
@@ -31,6 +33,12 @@ Main areas:
 - Never solve routing, intent, or compatibility problems by stubbing special
   words, prompt phrases, or one-off cases. Solutions must be general, explicit,
   and correct across equivalent inputs.
+- Do not classify prompts with keyword lists, regex phrase matching, or
+  language-specific trigger words. Prefer protocol fields, typed request state,
+  explicit configuration, or documented unsupported behavior.
+- Do not leave planning-era labels, temporary wave names, or numbered delivery
+  markers in code, docs, tests, metrics, fixtures, or public examples. Use stable
+  domain names that describe the behavior.
 - When changing public API behavior, update schemas, tests, README examples, and
   the benchmark suite together.
 - When changing Responses compatibility, update the machine-readable manifest,
@@ -101,7 +109,7 @@ When expanding Responses compatibility:
   other local tool execution inside Respawn.
 - Keep the support matrix in [`COMPATIBILITY.md`](COMPATIBILITY.md) accurate.
 - Record deliberate gaps as explicit unsupported manifest rows, not as a
-  separate roadmap document.
+  separate planning document.
 - Add focused tests under `apps/gateway/tests`.
 - Add benchmark coverage under `infra/docker/benchmark`.
 - Keep Ollama-specific translation inside `apps/gateway/src/adapters`.

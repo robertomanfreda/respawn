@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 from src.adapters.mock_control import mock_metadata
 from src.config import get_settings
 from src.main import create_app
+from src.observability.logging import TRACE_LEVEL
 from src.services.context_management import unseal_compaction_content
 from src.services.reasoning_encryption import unseal_reasoning_content
+from tests.helpers import backend_tool_names
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "incomplete"}
@@ -145,7 +147,7 @@ def test_response_request_settings_round_trip_through_retrieve(client):
     payload = {
         "model": "gpt-oss-120b",
         "input": "shape settings",
-        "metadata": {"ticket": "phase-1"},
+        "metadata": {"ticket": "settings-roundtrip"},
         "temperature": 0.2,
         "top_p": 0.9,
         "max_output_tokens": 16,
@@ -158,7 +160,7 @@ def test_response_request_settings_round_trip_through_retrieve(client):
     retrieved = client.get(f"/v1/responses/{created['id']}").json()
 
     for body in (created, retrieved):
-        assert body["metadata"] == {"ticket": "phase-1"}
+        assert body["metadata"] == {"ticket": "settings-roundtrip"}
         assert body["temperature"] == 0.2
         assert body["top_p"] == 0.9
         assert body["max_output_tokens"] == 16
@@ -312,7 +314,7 @@ def test_prompt_template_render_variables_and_versions(client):
             "id": "pmpt_integration",
             "version": "1",
             "input": "Prompt template marker word {{word}}.",
-            "metadata": {"phase": "12"},
+            "metadata": {"case": "prompt-template"},
         },
     )
     assert first_template.status_code == 200
@@ -1195,7 +1197,7 @@ def test_builtin_tools_are_explicitly_unsupported(client):
     assert response.json()["error"]["code"] == "unsupported_parameter"
     assert response.json()["error"]["param"] == "tools.0.type"
 
-    codex_like_response = client.post(
+    agent_like_response = client.post(
         "/v1/responses",
         json={
             "input": "search",
@@ -1212,9 +1214,9 @@ def test_builtin_tools_are_explicitly_unsupported(client):
         },
     )
 
-    assert codex_like_response.status_code == 400
-    assert codex_like_response.json()["error"]["code"] == "unsupported_parameter"
-    assert codex_like_response.json()["error"]["param"] == "tools.1.type"
+    assert agent_like_response.status_code == 400
+    assert agent_like_response.json()["error"]["code"] == "unsupported_parameter"
+    assert agent_like_response.json()["error"]["param"] == "tools.1.type"
 
 
 def test_web_search_required_returns_call_citations_and_retrieves(web_search_client):
@@ -1274,6 +1276,154 @@ def test_web_search_auto_uses_model_tool_call(web_search_client):
     assert web_search_client.app.state.web_search_backend.requests[0].query == "Search the web for latest Respawn auto search details"
 
 
+def test_web_search_followup_is_text_only_when_image_generation_is_available(web_search_and_image_generation_client):
+    response = web_search_and_image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search externally for the current Respawn routing fixture",
+            "tools": [{"type": "web_search"}, {"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="web_search"),
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["type"] for item in body["output"]] == ["web_search_call", "message"]
+    assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
+
+    payloads = web_search_and_image_generation_client.app.state.backend.payloads
+    assert "respawn_web_search" in backend_tool_names(payloads[0])
+    assert "respawn_image_generation" in backend_tool_names(payloads[0])
+    assert payloads[0]["messages"][0]["content"].startswith("Respawn tool-use policy:")
+    assert "answer normally without calling web_search" in payloads[0]["messages"][0]["content"]
+    assert "tools" not in payloads[1]
+    assert "tool_choice" not in payloads[1]
+    assert all(not message.get("content", "").startswith("Respawn tool-use policy:") for message in payloads[1]["messages"] if message.get("role") == "system")
+
+
+def test_image_generation_auto_keeps_tool_available_after_prior_image(image_generation_client):
+    first = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of an auto tiny house",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": True,
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["output"][0]["type"] == "image_generation_call"
+
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first.json()["id"],
+            "input": "Continue with a normal text answer.",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert all(item["type"] != "image_generation_call" for item in body["output"])
+    assert len(image_generation_client.app.state.image_generation_backend.requests) == 1
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+    assert "do not show an image placeholder" in payload["messages"][0]["content"]
+
+
+def test_image_generation_auto_can_generate_consecutive_images(image_generation_client):
+    first = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate image of an auto tiny house",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": True,
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["output"][0]["type"] == "image_generation_call"
+
+    second = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first.json()["id"],
+            "input": "Generate image of a tiny mouse",
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": False,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert len(image_generation_client.app.state.image_generation_backend.requests) == 2
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+
+
+def test_image_generation_auto_reexposes_after_intervening_text_context(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "revised_prompt": "a toad",
+                    "result": "base64-png",
+                    "size": "512x512",
+                },
+                {"type": "message", "role": "user", "content": "What is Kubernetes?"},
+                {"type": "message", "role": "assistant", "content": "Kubernetes orchestrates containers."},
+                {"type": "message", "role": "user", "content": "Generate image of a dog"},
+            ],
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="image_generation"),
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output"][0]["type"] == "image_generation_call"
+    assert len(image_generation_client.app.state.image_generation_backend.requests) == 1
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+
+
+def test_image_generation_auto_keeps_tool_after_empty_assistant_after_prior_image_context(image_generation_client):
+    response = image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": [
+                {
+                    "type": "image_generation_call",
+                    "status": "completed",
+                    "revised_prompt": "a dog",
+                    "result": "base64-png",
+                    "size": "512x512",
+                },
+                {"type": "message", "role": "assistant", "content": ""},
+                {"type": "message", "role": "user", "content": "What is Kubernetes?"},
+            ],
+            "tools": [{"type": "image_generation", "quality": "low"}],
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert all(item["type"] != "image_generation_call" for item in body["output"])
+    assert image_generation_client.app.state.image_generation_backend.requests == []
+    payload = image_generation_client.app.state.backend.payloads[-1]
+    assert "respawn_image_generation" in backend_tool_names(payload)
+
+
 def test_web_search_tool_choice_none_does_not_call_provider(web_search_client):
     response = web_search_client.post(
         "/v1/responses",
@@ -1321,7 +1471,7 @@ def test_web_search_filters_store_false_and_timeout(web_search_client):
     assert timeout.json()["error"]["code"] == "web_search_timeout"
 
 
-def test_codex_like_namespace_plus_web_search_passes_web_search_validation(web_search_client):
+def test_agent_like_namespace_plus_web_search_passes_web_search_validation(web_search_client):
     accepted = web_search_client.post(
         "/v1/responses",
         json={
@@ -1471,8 +1621,8 @@ def test_image_generation_followup_accepts_prior_web_search_call_item(image_gene
     assert body["output"][0]["status"] == "completed"
 
 
-def test_image_generation_tool_choice_none_and_codex_like_declaration_do_not_generate(image_generation_client):
-    codex_like = image_generation_client.post(
+def test_image_generation_tool_choice_none_and_agent_like_declaration_do_not_generate(image_generation_client):
+    agent_like = image_generation_client.post(
         "/v1/responses",
         json={
             "input": "List files in this repository",
@@ -1480,8 +1630,8 @@ def test_image_generation_tool_choice_none_and_codex_like_declaration_do_not_gen
             "tools": [{"type": "image_generation"}],
         },
     )
-    assert codex_like.status_code == 200
-    assert all(item["type"] != "image_generation_call" for item in codex_like.json()["output"])
+    assert agent_like.status_code == 200
+    assert all(item["type"] != "image_generation_call" for item in agent_like.json()["output"])
     assert image_generation_client.app.state.image_generation_backend.requests == []
 
     disabled_by_choice = image_generation_client.post(
@@ -1675,6 +1825,34 @@ def test_request_logs_include_error_param(client, monkeypatch):
     assert extra["error_param"] == "client_metadata"
 
 
+def test_metrics_request_log_is_trace_noise(client, monkeypatch):
+    info_records = []
+    debug_records = []
+    log_records = []
+
+    def capture_info(message, **kwargs):
+        info_records.append((message, kwargs.get("extra") or {}))
+
+    def capture_debug(message, **kwargs):
+        debug_records.append((message, kwargs.get("extra") or {}))
+
+    def capture_log(level, message, **kwargs):
+        log_records.append((level, message, kwargs.get("extra") or {}))
+
+    monkeypatch.setattr("src.main.logger.info", capture_info)
+    monkeypatch.setattr("src.main.logger.debug", capture_debug)
+    monkeypatch.setattr("src.main.logger.log", capture_log)
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert not [record for record in info_records if record[0] == "HTTP request completed"]
+    assert not [record for record in debug_records if record[0] == "HTTP request completed"]
+    records = [record for record in log_records if record[0] == TRACE_LEVEL and record[1] == "HTTP request completed"]
+    assert records
+    assert records[-1][2]["feature"] == "metrics"
+
+
 def test_reasoning_metrics_include_effort_tokens_and_heavy_counter(tmp_path, monkeypatch):
     with configured_client(
         tmp_path,
@@ -1745,6 +1923,101 @@ def test_function_tool_request_emits_function_call_without_executing(client):
             "arguments": '{"expression":"string"}',
         }
     ]
+
+
+def test_custom_tool_request_emits_custom_tool_call_without_executing(client):
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate raw HTML for a small page",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "html_writer",
+                    "description": "Write raw HTML.",
+                    "format": {"type": "text"},
+                }
+            ],
+            "tool_choice": {"type": "custom", "name": "html_writer"},
+            "store": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output_text"] == ""
+    call = body["output"][0]
+    assert call["type"] == "custom_tool_call"
+    assert call["status"] == "completed"
+    assert call["call_id"] == "call_mock_html_writer"
+    assert call["name"] == "html_writer"
+    assert call["input"] == "string"
+
+    input_items = client.get(f"/v1/responses/{body['id']}/input_items?order=asc").json()["data"]
+    assert input_items[0]["content"][0]["text"] == "Generate raw HTML for a small page"
+
+
+def test_custom_tool_call_output_followup_with_previous_response_id(client):
+    first = client.post(
+        "/v1/responses",
+        json={
+            "input": "Generate raw HTML please",
+            "tools": [{"type": "custom", "name": "html_writer"}],
+            "tool_choice": {"type": "custom", "name": "html_writer"},
+            "store": True,
+        },
+    ).json()
+    call = first["output"][0]
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "previous_response_id": first["id"],
+            "input": [{"type": "custom_tool_call_output", "call_id": call["call_id"], "output": "<h1>Cobalt</h1>"}],
+            "tools": [{"type": "custom", "name": "html_writer"}],
+            "store": True,
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["output"][0]["type"] == "message"
+    assert body["output_text"] == "Tool result: <h1>Cobalt</h1>"
+    input_items = client.get(f"/v1/responses/{body['id']}/input_items?order=asc").json()["data"]
+    assert input_items[0]["type"] == "custom_tool_call_output"
+    assert input_items[0]["call_id"] == call["call_id"]
+
+
+def test_namespace_custom_tool_request_emits_namespaced_custom_tool_call(client):
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "Use namespace custom tool please",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__repo__",
+                    "description": "Repository tools.",
+                    "tools": [
+                        {
+                            "type": "custom",
+                            "name": "write_patch",
+                            "description": "Write a raw patch.",
+                            "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"},
+                        }
+                    ],
+                }
+            ],
+            "tool_choice": {"type": "custom", "namespace": "mcp__repo__", "name": "write_patch"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output_text"] == ""
+    assert body["output"][0]["type"] == "custom_tool_call"
+    assert body["output"][0]["name"] == "write_patch"
+    assert body["output"][0]["namespace"] == "mcp__repo__"
 
 
 def test_namespace_tool_request_emits_namespaced_function_call(client):

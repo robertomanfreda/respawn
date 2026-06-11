@@ -63,6 +63,7 @@ async def test_prepare_multimodal_request_extracts_text_file_data():
     [
         ("note.md", "text/markdown", "# Marker\ncobalt"),
         ("data.json", "application/json", '{"marker":"cobalt"}'),
+        ("page.html", "text/html", "<main>marker cobalt</main>"),
         ("snippet.py", "text/x-python", "marker = 'cobalt'"),
     ],
 )

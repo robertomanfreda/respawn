@@ -360,17 +360,17 @@ def _ollama_think(payload: dict[str, Any]) -> bool | str | None:
 
 def _record_native_ollama_metrics(model: str, operation: str, data: dict[str, Any]) -> None:
     native = _native_ollama_data(data)
-    phases = {
+    stages = {
         "prefill": ("prompt_eval_count", "prompt_eval_duration"),
         "decode": ("eval_count", "eval_duration"),
     }
-    for phase, (count_key, duration_key) in phases.items():
+    for stage, (count_key, duration_key) in stages.items():
         tokens = _int_metric(native.get(count_key))
         duration_seconds = _duration_seconds(native.get(duration_key))
         if tokens <= 0:
             continue
 
-        labels = {"model": model, "operation": operation, "phase": phase}
+        labels = {"model": model, "operation": operation, "stage": stage}
         backend_labels = {"backend": "ollama", **labels}
         MODEL_BACKEND_EVAL_TOKENS.labels(**backend_labels).inc(tokens)
         OLLAMA_EVAL_TOKENS.labels(**labels).inc(tokens)

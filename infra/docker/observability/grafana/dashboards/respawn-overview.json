@@ -465,7 +465,7 @@
       },
       "targets": [
         {
-          "expr": "avg(gateway_backend_eval_tokens_per_second{backend=~\"$llm_backend\",model=~\"$model\",phase=\"prefill\"}) by (backend, model)",
+          "expr": "avg(gateway_backend_eval_tokens_per_second{backend=~\"$llm_backend\",model=~\"$model\",stage=\"prefill\"}) by (backend, model)",
           "legendFormat": "{{backend}} / {{model}}",
           "refId": "A"
         }
@@ -501,7 +501,7 @@
       },
       "targets": [
         {
-          "expr": "avg(gateway_backend_eval_tokens_per_second{backend=~\"$llm_backend\",model=~\"$model\",phase=\"decode\"}) by (backend, model)",
+          "expr": "avg(gateway_backend_eval_tokens_per_second{backend=~\"$llm_backend\",model=~\"$model\",stage=\"decode\"}) by (backend, model)",
           "legendFormat": "{{backend}} / {{model}}",
           "refId": "A"
         }
@@ -567,12 +567,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gateway_backend_eval_tokens_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"prefill\"}[$__rate_interval])) by (backend, model, operation) / clamp_min(sum(rate(gateway_backend_eval_duration_seconds_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"prefill\"}[$__rate_interval])) by (backend, model, operation), 0.001)",
+          "expr": "sum(rate(gateway_backend_eval_tokens_total{backend=~\"$llm_backend\",model=~\"$model\",stage=\"prefill\"}[$__rate_interval])) by (backend, model, operation) / clamp_min(sum(rate(gateway_backend_eval_duration_seconds_total{backend=~\"$llm_backend\",model=~\"$model\",stage=\"prefill\"}[$__rate_interval])) by (backend, model, operation), 0.001)",
           "legendFormat": "prefill / {{backend}} / {{model}} / {{operation}}",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(gateway_backend_eval_tokens_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"decode\"}[$__rate_interval])) by (backend, model, operation) / clamp_min(sum(rate(gateway_backend_eval_duration_seconds_total{backend=~\"$llm_backend\",model=~\"$model\",phase=\"decode\"}[$__rate_interval])) by (backend, model, operation), 0.001)",
+          "expr": "sum(rate(gateway_backend_eval_tokens_total{backend=~\"$llm_backend\",model=~\"$model\",stage=\"decode\"}[$__rate_interval])) by (backend, model, operation) / clamp_min(sum(rate(gateway_backend_eval_duration_seconds_total{backend=~\"$llm_backend\",model=~\"$model\",stage=\"decode\"}[$__rate_interval])) by (backend, model, operation), 0.001)",
           "legendFormat": "decode / {{backend}} / {{model}} / {{operation}}",
           "refId": "B"
         }

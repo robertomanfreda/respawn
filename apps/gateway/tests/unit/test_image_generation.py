@@ -19,6 +19,7 @@ from src.services.responses_compat import (
     image_generation_requested,
     image_generation_required,
     image_generation_tools,
+    tool_use_policy_instruction,
     validate_text_responses_request,
 )
 
@@ -126,7 +127,7 @@ def test_image_generation_prompt_routing_is_deterministic():
     assert prompt == 'ahahah ma questo non è un rospo!! Un rospo "a frog"'
 
 
-def test_image_generation_auto_is_exposed_as_internal_backend_function():
+def test_image_generation_auto_is_exposed_as_internal_backend_function_without_prior_image_context():
     request = ResponseRequest(input="Generate image of a tiny house", tools=[{"type": "image_generation"}])
 
     tools = backend_function_tools(request)
@@ -138,11 +139,55 @@ def test_image_generation_auto_is_exposed_as_internal_backend_function():
     assert backend_function_tools(forced) == []
 
 
-def test_image_generation_auto_remains_available_after_prior_image_context():
+def test_image_generation_auto_remains_exposed_after_prior_image_generation_context():
+    request = ResponseRequest(input="Continue the conversation", tools=[{"type": "image_generation"}])
+    chain = [{"output_json": [{"type": "image_generation_call", "status": "completed", "revised_prompt": "a toad"}]}]
+
+    assert any(tool["function"]["name"] == IMAGE_GENERATION_INTERNAL_TOOL_NAME for tool in backend_function_tools(request, chain))
+
+
+def test_image_generation_auto_remains_exposed_when_image_context_immediately_precedes_latest_user():
     request = ResponseRequest(
         input=[
-            {"type": "image_generation_call", "status": "completed", "revised_prompt": "a dog", "size": "512x512"},
-            {"role": "user", "content": "migliora l'immagine del cane"},
+            {"type": "image_generation_call", "status": "completed", "revised_prompt": "a toad", "result": "base64-png"},
+            {"type": "message", "role": "user", "content": "Continue with a normal text answer."},
+        ],
+        tools=[{"type": "image_generation"}],
+    )
+
+    assert any(tool["function"]["name"] == IMAGE_GENERATION_INTERNAL_TOOL_NAME for tool in backend_function_tools(request))
+
+
+def test_image_generation_auto_remains_exposed_after_empty_assistant_items():
+    request = ResponseRequest(
+        input=[
+            {"type": "image_generation_call", "status": "completed", "revised_prompt": "a dog", "result": "base64-png"},
+            {"type": "message", "role": "assistant", "content": ""},
+            {"type": "message", "role": "user", "content": "What is Kubernetes?"},
+        ],
+        tools=[{"type": "image_generation"}],
+    )
+
+    assert any(tool["function"]["name"] == IMAGE_GENERATION_INTERNAL_TOOL_NAME for tool in backend_function_tools(request))
+
+
+def test_image_generation_auto_adds_general_tool_use_policy():
+    request = ResponseRequest(input="What is Kubernetes?", tools=[{"type": "image_generation"}])
+
+    instruction = tool_use_policy_instruction(request)
+
+    assert instruction is not None
+    assert "latest user request" in instruction
+    assert "do not show an image placeholder" in instruction
+
+
+def test_image_generation_auto_is_exposed_when_prior_image_context_is_not_latest_turn():
+    request = ResponseRequest(
+        input=[
+            {"type": "image_generation_call", "status": "completed", "revised_prompt": "a toad", "result": "base64-png"},
+            {"type": "message", "role": "user", "content": "What is Kubernetes?"},
+            {"type": "message", "role": "assistant", "content": "Kubernetes orchestrates containers."},
+            {"type": "message", "role": "user", "content": "Generate image of a dog"},
         ],
         tools=[{"type": "image_generation"}],
     )

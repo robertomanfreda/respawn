@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 import asyncio
+import copy
 import json
 from typing import Any
 
@@ -13,11 +14,13 @@ from src.services.structured_outputs import example_for_schema, schema_from_resp
 class MockBackend(ModelBackend):
     def __init__(self, default_model: str = "mock-model") -> None:
         self.default_model = default_model
+        self.payloads: list[dict[str, Any]] = []
 
     async def list_models(self) -> ModelList:
         return ModelList(data=[ModelObject(id=self.default_model, owned_by="mock")])
 
     async def create_chat_completion(self, payload: dict[str, Any]) -> ChatCompletionResult:
+        self.payloads.append(copy.deepcopy(payload))
         messages = payload.get("messages", [])
         last_user = next((m for m in reversed(messages) if m.get("role") == "user"), {})
         text = _content_to_text(last_user.get("content", ""))

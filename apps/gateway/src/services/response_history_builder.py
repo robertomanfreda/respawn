@@ -3,9 +3,10 @@ from typing import Any
 import json
 
 from src.schemas.errors import OpenAIError
+from src.services.tool_call_arguments import arguments_to_string
 
 
-TOOL_ITEM_TYPES = {"function_call", "function_call_output", "tool_result"}
+TOOL_ITEM_TYPES = {"function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "tool_result"}
 
 
 def build_messages(
@@ -57,6 +58,11 @@ def input_to_messages(input_value: str | list[dict[str, Any]] | None, *, compact
         elif item_type == "function_call_output":
             _flush_tool_calls(messages, pending_tool_calls)
             messages.append({"role": "tool", "tool_call_id": str(item["call_id"]), "content": function_output_to_text(item.get("output", ""))})
+        elif item_type == "custom_tool_call":
+            pending_tool_calls.append(_chat_custom_tool_call(item))
+        elif item_type == "custom_tool_call_output":
+            _flush_tool_calls(messages, pending_tool_calls)
+            messages.append({"role": "tool", "tool_call_id": str(item["call_id"]), "content": function_output_to_text(item.get("output", ""))})
         elif item_type == "web_search_call":
             _flush_tool_calls(messages, pending_tool_calls)
             message = _web_search_message(item)
@@ -85,6 +91,8 @@ def output_to_messages(output: list[dict[str, Any]], *, compaction_key: str | No
             messages.append({"role": item.get("role", "assistant"), "content": content_to_text(item.get("content", ""))})
         elif item.get("type") == "function_call":
             pending_tool_calls.append(_chat_tool_call(item))
+        elif item.get("type") == "custom_tool_call":
+            pending_tool_calls.append(_chat_custom_tool_call(item))
         elif item.get("type") == "web_search_call":
             _flush_tool_calls(messages, pending_tool_calls)
             message = _web_search_message(item)
@@ -100,7 +108,7 @@ def output_to_messages(output: list[dict[str, Any]], *, compaction_key: str | No
             message = _compaction_message(item, compaction_key=compaction_key)
             if message is not None:
                 messages.append(message)
-        elif item.get("type") in {"function_call_output", "tool_result", "reasoning"}:
+        elif item.get("type") in {"function_call_output", "custom_tool_call_output", "tool_result", "reasoning"}:
             continue
     _flush_tool_calls(messages, pending_tool_calls)
     return messages
@@ -131,7 +139,21 @@ def _chat_tool_call(item: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": backend_name,
-            "arguments": _arguments_to_string(item.get("arguments", "{}")),
+            "arguments": arguments_to_string(item.get("arguments", "{}")),
+        },
+    }
+
+
+def _chat_custom_tool_call(item: dict[str, Any]) -> dict[str, Any]:
+    name = str(item["name"])
+    namespace = item.get("namespace")
+    backend_name = f"{namespace}{name}" if namespace is not None else name
+    return {
+        "id": str(item["call_id"]),
+        "type": "function",
+        "function": {
+            "name": backend_name,
+            "arguments": json.dumps({"input": str(item.get("input") or "")}, separators=(",", ":"), ensure_ascii=False),
         },
     }
 
@@ -189,13 +211,6 @@ def function_output_to_text(output: Any) -> str:
     if isinstance(output, str):
         return output
     return json.dumps(output, separators=(",", ":"), ensure_ascii=False)
-
-
-def _arguments_to_string(arguments: Any) -> str:
-    if isinstance(arguments, str):
-        return arguments
-    return json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
-
 
 def content_to_message_content(content: Any) -> Any:
     if isinstance(content, list) and any(isinstance(part, dict) and part.get("type") in {"input_image", "input_file"} for part in content):

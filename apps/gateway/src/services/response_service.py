@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -39,6 +40,7 @@ from src.observability.metrics import (
     STREAMING_RESPONSES_RUNNING,
     TOKEN_USAGE,
 )
+from src.observability.model_io import log_model_request, log_model_response, log_model_stream_chunk
 from src.schemas.errors import OpenAIError
 from src.schemas.responses import ResponseArtifactList, ResponseCompactionObject, ResponseInputItemList, ResponseInputTokenCount, ResponseObject, ResponseRequest, ResponseUsage
 from src.services.context_management import ContextPlan, ContextPlanner, compact_response_window
@@ -61,7 +63,10 @@ from src.services.multimodal_inputs import prepare_multimodal_request
 from src.services.prompt_cache import PromptCache, PromptCacheMatch
 from src.services.prompt_templates import PromptTemplateRenderer
 from src.services.structured_outputs import repair_instruction, schema_from_response_format, validate_text_against_schema
+from src.services.tool_call_arguments import arguments_to_string
 from src.services.responses_compat import (
+    CUSTOM_TOOL_INPUT_FIELD,
+    TOOL_USE_POLICY_PREFIX,
     estimate_input_tokens,
     estimate_text_tokens,
     backend_function_tools,
@@ -79,6 +84,7 @@ from src.services.responses_compat import (
     is_internal_web_search_tool_call,
     stream_obfuscation_enabled,
     tool_choice_instruction,
+    tool_use_policy_instruction,
     validate_function_call_outputs_match,
     validate_reasoning_capabilities,
     validate_text_responses_request,
@@ -91,6 +97,9 @@ from src.services.usage_meter import enrich_response_usage, normalize_usage
 from src.services.web_search import WebSearchExecution, WebSearchService, url_citation_annotations, validate_web_search_configuration
 from src.storage.repository import ResponseRepository
 from src.streaming.events import make_event
+
+
+logger = logging.getLogger(__name__)
 
 
 class ResponseService:
@@ -475,6 +484,8 @@ class ResponseService:
                 return
             payload = self._payload(model=model, request=plan.request, chain=plan.chain)
             self._inject_web_search_context(payload, web_search)
+            if web_search is not None:
+                self._force_text_followup_payload(payload)
             cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
             self._record_prompt_cache_metrics(cache_match)
             if reasoning_requested(request):
@@ -496,7 +507,9 @@ class ResponseService:
                 output_index += 1
             output_id: str | None = None
             text_output_index: int | None = None
+            log_model_request(logger, api="responses", phase="stream", payload=payload)
             async for chunk in self.backend.create_chat_completion_stream(payload):
+                log_model_stream_chunk(logger, api="responses", phase="stream", chunk=chunk)
                 if chunk.get("type") == "reasoning_delta":
                     reasoning_text += chunk.get("delta", "")
                 elif chunk.get("type") == "delta":
@@ -543,6 +556,8 @@ class ResponseService:
                 elif chunk.get("type") == "tool_calls":
                     tool_calls = chunk.get("tool_calls") or []
                     streamed_backend_tool_calls.extend(tool_calls)
+                    if web_search is not None:
+                        continue
                     for web_search_execution in await self._execute_internal_web_search_tool_calls(tool_calls, plan.request, response_id=response_id):
                         internal_web_searches.append(web_search_execution)
                         current_output_index = output_index
@@ -585,7 +600,10 @@ class ResponseService:
                         output_index += 1
                     for item in self._function_call_output_items(tool_calls, request):
                         current_output_index = output_index
-                        added_item = {**item, "arguments": "", "status": "in_progress"}
+                        if item.get("type") == "custom_tool_call":
+                            added_item = {**item, "input": "", "status": "in_progress"}
+                        else:
+                            added_item = {**item, "arguments": "", "status": "in_progress"}
                         if should_store:
                             await self.repository.create_output_item(
                                 response_id=response_id,
@@ -596,6 +614,11 @@ class ResponseService:
                             "response.output_item.added",
                             {"response_id": response_id, "output_index": current_output_index, "item": added_item},
                         )
+                        if item.get("type") == "custom_tool_call":
+                            yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": item})
+                            emitted_items.append((current_output_index, item))
+                            output_index += 1
+                            continue
                         if item["arguments"]:
                             yield event(
                                 "response.function_call_arguments.delta",
@@ -623,18 +646,22 @@ class ResponseService:
                 elif chunk.get("type") == "done":
                     usage = normalize_usage(chunk.get("usage"))
                     finish_reason = chunk.get("finish_reason")
+            if web_search is not None:
+                self._validate_text_followup_tool_calls(streamed_backend_tool_calls, model)
             if internal_web_searches:
                 self._validate_tool_result(ChatCompletionResult(content=output_text, reasoning=reasoning_text, finish_reason=finish_reason, tool_calls=streamed_backend_tool_calls), request, model)
                 self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
                 followup_payload = self._payload(model=model, request=plan.request, chain=plan.chain)
                 self._inject_web_search_contexts(followup_payload, [search for search in ([web_search] if web_search is not None else []) + internal_web_searches])
-                self._remove_internal_web_search_tool(followup_payload)
+                self._force_text_followup_payload(followup_payload)
                 cache_match = self.prompt_cache.inspect(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
                 self._record_prompt_cache_metrics(cache_match)
                 payload = followup_payload
                 streamed_backend_tool_calls = []
                 finish_reason = None
+                log_model_request(logger, api="responses", phase="stream_followup", payload=payload)
                 async for chunk in self.backend.create_chat_completion_stream(payload):
+                    log_model_stream_chunk(logger, api="responses", phase="stream_followup", chunk=chunk)
                     if chunk.get("type") == "reasoning_delta":
                         reasoning_text += chunk.get("delta", "")
                     elif chunk.get("type") == "delta":
@@ -681,67 +708,12 @@ class ResponseService:
                     elif chunk.get("type") == "tool_calls":
                         tool_calls = chunk.get("tool_calls") or []
                         streamed_backend_tool_calls.extend(tool_calls)
-                        for image_generation_execution in await self._execute_internal_image_generation_tool_calls(tool_calls, plan.request, response_id=response_id):
-                            current_output_index = output_index
-                            if should_store:
-                                await self.repository.create_output_item(
-                                    response_id=response_id,
-                                    output_index=current_output_index,
-                                    item=image_generation_execution.output_item,
-                                )
-                            yield event(
-                                "response.output_item.added",
-                                {
-                                    "response_id": response_id,
-                                    "output_index": current_output_index,
-                                    "item": image_generation_execution.output_item,
-                                },
-                            )
-                            yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": image_generation_execution.output_item})
-                            emitted_items.append((current_output_index, image_generation_execution.output_item))
-                            output_index += 1
-                        for item in self._function_call_output_items(tool_calls, request):
-                            current_output_index = output_index
-                            added_item = {**item, "arguments": "", "status": "in_progress"}
-                            if should_store:
-                                await self.repository.create_output_item(
-                                    response_id=response_id,
-                                    output_index=current_output_index,
-                                    item=added_item,
-                                )
-                            yield event(
-                                "response.output_item.added",
-                                {"response_id": response_id, "output_index": current_output_index, "item": added_item},
-                            )
-                            if item["arguments"]:
-                                yield event(
-                                    "response.function_call_arguments.delta",
-                                    delta_event_data(
-                                        {
-                                            "response_id": response_id,
-                                            "item_id": item["id"],
-                                            "output_index": current_output_index,
-                                            "delta": item["arguments"],
-                                        }
-                                    ),
-                                )
-                            yield event(
-                                "response.function_call_arguments.done",
-                                {
-                                    "response_id": response_id,
-                                    "item_id": item["id"],
-                                    "output_index": current_output_index,
-                                    "arguments": item["arguments"],
-                                },
-                            )
-                            yield event("response.output_item.done", {"response_id": response_id, "output_index": current_output_index, "item": item})
-                            emitted_items.append((current_output_index, item))
-                            output_index += 1
                     elif chunk.get("type") == "done":
                         usage = normalize_usage(chunk.get("usage"))
                         finish_reason = chunk.get("finish_reason")
+                self._validate_text_followup_tool_calls(streamed_backend_tool_calls, model)
             self._validate_tool_result(ChatCompletionResult(content=output_text, reasoning=reasoning_text, finish_reason=finish_reason, tool_calls=streamed_backend_tool_calls), request, model)
-            streamed_tool_calls = [self._backend_tool_call_from_item(item) for _, item in emitted_items if item.get("type") == "function_call"]
+            streamed_tool_calls = [self._backend_tool_call_from_item(item) for _, item in emitted_items if item.get("type") in {"function_call", "custom_tool_call"}]
             generated_image_items = [item for _, item in emitted_items if item.get("type") == "image_generation_call"]
             if output_text or (not streamed_tool_calls and not generated_image_items):
                 validate_text_against_schema(output_text, schema_from_response_format(self._structured_format(request)))
@@ -985,15 +957,17 @@ class ResponseService:
             if web_search is not None:
                 output.append(web_search.output_item)
             output.append(image_generation.output_item)
-            if plan.compaction_item is not None:
-                output.insert(0, {**plan.compaction_item, "status": "completed"})
-            return output, usage, "completed", None
+            return self._with_compaction_item(output, plan.compaction_item), usage, "completed", None
         payload = self._payload(model=model, request=plan.request, chain=plan.chain)
         self._inject_web_search_context(payload, web_search)
+        if web_search is not None:
+            self._force_text_followup_payload(payload)
         cache_match = self.prompt_cache.inspect(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
         self._record_prompt_cache_metrics(cache_match)
         result = await self._run_with_structured_repair(response_id=response_id, payload=payload, request=plan.request, should_store=should_store)
         self._validate_logprobs_result(result, request, model)
+        if web_search is not None:
+            self._validate_text_followup_tool_calls(result.tool_calls, model)
         self._validate_tool_result(result, request, model)
         internal_web_searches = await self._execute_internal_web_search_tool_calls(result.tool_calls, plan.request, response_id=response_id)
         if internal_web_searches:
@@ -1002,32 +976,28 @@ class ResponseService:
             first_usage = self._usage(result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)}), cache_match)
             followup_payload = self._payload(model=model, request=plan.request, chain=plan.chain)
             self._inject_web_search_contexts(followup_payload, web_searches)
-            self._remove_internal_web_search_tool(followup_payload)
+            self._force_text_followup_payload(followup_payload)
             followup_cache_match = self.prompt_cache.inspect(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
             self._record_prompt_cache_metrics(followup_cache_match)
             result = await self._run_with_structured_repair(response_id=response_id, payload=followup_payload, request=plan.request, should_store=should_store)
             self._validate_logprobs_result(result, request, model)
+            self._validate_text_followup_tool_calls(result.tool_calls, model)
             self._validate_tool_result(result, request, model)
-            image_generations = await self._execute_internal_image_generation_tool_calls(result.tool_calls, plan.request, response_id=response_id)
             result = result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)})
             usage = _combine_usage(first_usage, self._usage(result, followup_cache_match))
             response_status, incomplete_details = self._completion_status(result.finish_reason)
-            output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches, image_generations=image_generations)
-            if plan.compaction_item is not None:
-                output.insert(0, {**plan.compaction_item, "status": "completed"})
+            output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches)
             self._record_token_usage(model, usage)
             self.prompt_cache.store(followup_payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-            return output, usage, response_status, incomplete_details
+            return self._with_compaction_item(output, plan.compaction_item), usage, response_status, incomplete_details
         image_generations = await self._execute_internal_image_generation_tool_calls(result.tool_calls, plan.request, response_id=response_id)
         result = result.model_copy(update={"tool_calls": self._public_tool_calls(result.tool_calls)})
         usage = self._usage(result, cache_match)
         response_status, incomplete_details = self._completion_status(result.finish_reason)
         output = self._output_items(result, request, response_id=response_id, response_status=response_status, web_searches=web_searches, image_generations=image_generations)
-        if plan.compaction_item is not None:
-            output.insert(0, {**plan.compaction_item, "status": "completed"})
         self._record_token_usage(model, usage)
         self.prompt_cache.store(payload, prompt_cache_key=request.prompt_cache_key, retention=request.prompt_cache_retention)
-        return output, usage, response_status, incomplete_details
+        return self._with_compaction_item(output, plan.compaction_item), usage, response_status, incomplete_details
 
     async def _plan_context(
         self,
@@ -1078,8 +1048,8 @@ class ResponseService:
 
     def _record_compaction_metrics(self, *, model: str, mode: str, before: int, after: int) -> None:
         CONTEXT_COMPACTIONS.labels(model=model, mode=mode).inc()
-        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, phase="before").inc(before)
-        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, phase="after").inc(after)
+        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, stage="before").inc(before)
+        CONTEXT_COMPACTION_TOKENS.labels(model=model, mode=mode, stage="after").inc(after)
         CONTEXT_TRUNCATIONS.labels(model=model, reason="context_window").inc(0)
         CONTEXT_OVERFLOWS.labels(model=model, truncation="disabled").inc(0)
         ratio = after / before if before > 0 else 0.0
@@ -1095,6 +1065,11 @@ class ResponseService:
         PROMPT_CACHE_TOKENS.labels(kind="cached").inc(cache_match.cached_tokens)
         ratio = cache_match.cached_tokens / cache_match.input_tokens if cache_match.input_tokens > 0 else 0.0
         PROMPT_CACHE_HIT_RATIO.labels(retention=cache_match.retention).set(ratio)
+
+    def _with_compaction_item(self, output: list[dict[str, Any]], compaction_item: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if compaction_item is None:
+            return output
+        return [{**compaction_item, "status": "completed"}, *output]
 
     def _schedule_background_response(self, response_id: str, tenant_id: str | None) -> None:
         if self.session_factory is None or self.background_tasks is None:
@@ -1132,6 +1107,9 @@ class ResponseService:
         instruction = tool_choice_instruction(request)
         if instruction:
             messages.insert(0, {"role": "system", "content": instruction})
+        policy_instruction = tool_use_policy_instruction(request)
+        if policy_instruction:
+            messages.insert(0, {"role": "system", "content": policy_instruction})
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -1139,7 +1117,7 @@ class ResponseService:
             "top_p": request.top_p,
             "max_tokens": request.max_output_tokens or self.settings.max_output_tokens_default,
         }
-        tools = backend_function_tools(request)
+        tools = backend_function_tools(request, chain)
         if request.tool_choice == "none":
             tools = []
         if tools:
@@ -1210,6 +1188,19 @@ class ResponseService:
             function = dict(call.get("function") or {})
             call_id = str(call.get("id") or generate_id("call"))
             resolved_name = function_call_output_name(str(function.get("name") or ""), request)
+            if resolved_name.get("type") == "custom":
+                item = {
+                    "id": generate_id("ctc"),
+                    "type": "custom_tool_call",
+                    "status": "completed",
+                    "call_id": call_id,
+                    "name": resolved_name["name"],
+                    "input": self._custom_tool_input(function.get("arguments", "{}")),
+                }
+                if resolved_name.get("namespace") is not None:
+                    item["namespace"] = resolved_name["namespace"]
+                items.append(item)
+                continue
             item = {
                 "id": generate_id("fc"),
                 "type": "function_call",
@@ -1222,6 +1213,16 @@ class ResponseService:
                 item["namespace"] = resolved_name["namespace"]
             items.append(item)
         return items
+
+    def _custom_tool_input(self, arguments: Any) -> str:
+        value = self._arguments_to_string(arguments)
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError:
+            return value
+        if isinstance(parsed, dict) and CUSTOM_TOOL_INPUT_FIELD in parsed:
+            return str(parsed.get(CUSTOM_TOOL_INPUT_FIELD) or "")
+        return value
 
     async def _execute_internal_image_generation_tool_calls(self, tool_calls: list[dict[str, Any]], request: ResponseRequest, *, response_id: str) -> list[ImageGenerationExecution]:
         executions: list[ImageGenerationExecution] = []
@@ -1241,12 +1242,16 @@ class ResponseService:
         return [call for call in tool_calls if not is_internal_image_generation_tool_call(call) and not is_internal_web_search_tool_call(call)]
 
     def _backend_tool_call_from_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        if item.get("type") == "custom_tool_call":
+            arguments = json.dumps({CUSTOM_TOOL_INPUT_FIELD: str(item.get("input") or "")}, separators=(",", ":"), ensure_ascii=False)
+        else:
+            arguments = item["arguments"]
         return {
             "id": item["call_id"],
             "type": "function",
             "function": {
                 "name": self._backend_function_name(item),
-                "arguments": item["arguments"],
+                "arguments": arguments,
             },
         }
 
@@ -1287,17 +1292,20 @@ class ResponseService:
             return True
         if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
             return True
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "custom":
+            return True
         if isinstance(tool_choice, dict) and tool_choice.get("type") == "allowed_tools" and tool_choice.get("mode") == "required":
             return True
         return False
 
     def _forced_tool_name(self, request: ResponseRequest) -> str | None:
         tool_choice = request.tool_choice
-        if not isinstance(tool_choice, dict) or tool_choice.get("type") != "function":
+        if not isinstance(tool_choice, dict) or tool_choice.get("type") not in {"function", "custom"}:
             return None
         function = tool_choice.get("function") if isinstance(tool_choice.get("function"), dict) else {}
-        name = str(tool_choice.get("name") or function.get("name") or "")
-        namespace = tool_choice.get("namespace") or function.get("namespace")
+        custom = tool_choice.get("custom") if isinstance(tool_choice.get("custom"), dict) else {}
+        name = str(tool_choice.get("name") or function.get("name") or custom.get("name") or "")
+        namespace = tool_choice.get("namespace") or function.get("namespace") or custom.get("namespace")
         return f"{namespace}{name}" if namespace is not None else name
 
     def _backend_function_name(self, item: dict[str, Any]) -> str:
@@ -1332,7 +1340,9 @@ class ResponseService:
         should_store: bool,
     ):
         schema = schema_from_response_format(self._structured_format(request))
+        log_model_request(logger, api="responses", phase="blocking", payload=payload)
         result = await self.backend.create_chat_completion(payload)
+        log_model_response(logger, api="responses", phase="blocking", result=result)
         try:
             validate_text_against_schema(result.content, schema)
             return result
@@ -1347,7 +1357,9 @@ class ResponseService:
             {"role": "system", "content": repair_instruction(schema)},
         ]
         repair_payload["_respawn_repair_attempt"] = True
+        log_model_request(logger, api="responses", phase="structured_repair", payload=repair_payload)
         repaired = await self.backend.create_chat_completion(repair_payload)
+        log_model_response(logger, api="responses", phase="structured_repair", result=repaired)
         validate_text_against_schema(repaired.content, schema)
         return repaired
 
@@ -1424,6 +1436,30 @@ class ResponseService:
                     }
                 )
                 continue
+            if item_type == "custom_tool_call":
+                custom_item = {
+                    "id": generate_id("ctc"),
+                    "type": "custom_tool_call",
+                    "call_id": str(item["call_id"]),
+                    "name": str(item["name"]),
+                    "input": str(item.get("input") or ""),
+                    "status": item.get("status", "completed"),
+                }
+                if item.get("namespace") is not None:
+                    custom_item["namespace"] = str(item["namespace"])
+                items.append(custom_item)
+                continue
+            if item_type == "custom_tool_call_output":
+                items.append(
+                    {
+                        "id": generate_id("ctco"),
+                        "type": "custom_tool_call_output",
+                        "call_id": str(item["call_id"]),
+                        "output": item.get("output", ""),
+                        "status": item.get("status", "completed"),
+                    }
+                )
+                continue
             if item_type == "message" or role in {"user", "assistant", "system", "developer"}:
                 items.append(
                     {
@@ -1456,10 +1492,7 @@ class ResponseService:
         return [{"type": "input_text", "text": str(content)}]
 
     def _arguments_to_string(self, arguments: Any) -> str:
-        if isinstance(arguments, str):
-            value = arguments
-        else:
-            value = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
+        value = arguments_to_string(arguments)
         try:
             json.loads(value or "{}")
         except json.JSONDecodeError as exc:
@@ -1680,17 +1713,26 @@ class ResponseService:
             context = "\n\n".join(search.context for search in web_searches)
             messages.insert(insert_at, {"role": "system", "content": context})
 
-    def _remove_internal_web_search_tool(self, payload: dict[str, Any]) -> None:
-        tools = payload.get("tools")
-        if not isinstance(tools, list):
-            return
-        public_tools = [tool for tool in tools if not is_internal_web_search_tool_call(tool)]
-        if public_tools:
-            payload["tools"] = public_tools
-            return
+    def _force_text_followup_payload(self, payload: dict[str, Any]) -> None:
         payload.pop("tools", None)
-        if payload.get("tool_choice") in {"auto", "required"}:
-            payload.pop("tool_choice", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
+        payload.pop("max_tool_calls", None)
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            payload["messages"] = [
+                message
+                for message in messages
+                if not (
+                    isinstance(message, dict)
+                    and message.get("role") == "system"
+                    and str(message.get("content", "")).startswith(TOOL_USE_POLICY_PREFIX)
+                )
+            ]
+
+    def _validate_text_followup_tool_calls(self, tool_calls: list[dict[str, Any]], model: str) -> None:
+        if tool_calls:
+            self._tool_capability_error(model, "text_followup_tool_call", "Configured backend/model returned a function_call during a text-only internal tool follow-up.")
 
     def _input_file_parts(self, input_value: Any) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
