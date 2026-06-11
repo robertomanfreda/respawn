@@ -20,6 +20,14 @@ def parse_sse_events(text):
     return events
 
 
+def backend_tool_names(payload):
+    names = []
+    for tool in payload.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else {}
+        names.append(function.get("name"))
+    return names
+
+
 def test_streaming_event_lifecycle(client):
     with client.stream("POST", "/v1/responses", json={"input": "hello stream", "stream": True, "store": True}) as response:
         text = "".join(response.iter_text())
@@ -184,6 +192,32 @@ def test_streaming_web_search_output_item_events(web_search_client):
 
     retrieved = web_search_client.get(f"/v1/responses/{terminal_response['id']}").json()
     assert retrieved["output"] == terminal_response["output"]
+
+
+def test_streaming_web_search_followup_is_text_only_with_image_generation_available(web_search_and_image_generation_client):
+    with web_search_and_image_generation_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "input": "Search externally for the streaming routing fixture",
+            "tools": [{"type": "web_search"}, {"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="web_search"),
+            "stream": True,
+            "store": True,
+        },
+    ) as response:
+        text = "".join(response.iter_text())
+
+    events = parse_sse_events(text)
+    terminal_response = events[-1]["data"]["response"]
+    assert events[-1]["event"] == "response.completed"
+    assert [item["type"] for item in terminal_response["output"]] == ["web_search_call", "message"]
+    assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
+
+    payloads = web_search_and_image_generation_client.app.state.backend.payloads
+    assert {"respawn_web_search", "respawn_image_generation"} <= set(backend_tool_names(payloads[0]))
+    assert "tools" not in payloads[1]
+    assert "tool_choice" not in payloads[1]
 
 
 def test_streaming_web_search_failure_events(web_search_client):

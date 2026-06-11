@@ -43,6 +43,14 @@ def _upload_text_file(client, *, filename: str = "facts.txt", text: str = "Respa
     )
 
 
+def _backend_tool_names(payload: dict) -> list[str]:
+    names = []
+    for tool in payload.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) and isinstance(tool.get("function"), dict) else {}
+        names.append(function.get("name"))
+    return names
+
+
 def test_list_models(client):
     response = client.get("/v1/models")
     assert response.status_code == 200
@@ -1272,6 +1280,28 @@ def test_web_search_auto_uses_model_tool_call(web_search_client):
     assert all(item["type"] != "function_call" for item in body["output"])
     assert body["output"][1]["content"][0]["annotations"][0]["type"] == "url_citation"
     assert web_search_client.app.state.web_search_backend.requests[0].query == "Search the web for latest Respawn auto search details"
+
+
+def test_web_search_followup_is_text_only_when_image_generation_is_available(web_search_and_image_generation_client):
+    response = web_search_and_image_generation_client.post(
+        "/v1/responses",
+        json={
+            "input": "Search externally for the current Respawn routing fixture",
+            "tools": [{"type": "web_search"}, {"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="web_search"),
+            "store": False,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["type"] for item in body["output"]] == ["web_search_call", "message"]
+    assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
+
+    payloads = web_search_and_image_generation_client.app.state.backend.payloads
+    assert {"respawn_web_search", "respawn_image_generation"} <= set(_backend_tool_names(payloads[0]))
+    assert "tools" not in payloads[1]
+    assert "tool_choice" not in payloads[1]
 
 
 def test_web_search_tool_choice_none_does_not_call_provider(web_search_client):
