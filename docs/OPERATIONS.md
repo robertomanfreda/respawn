@@ -53,6 +53,18 @@ HTTP completion logs are structured JSON. Each request log includes:
 
 Logs intentionally avoid API keys and full request or response payloads.
 
+Set `LOG_LEVEL=DEBUG` when debugging model behavior. Respawn then emits
+structured `Model request payload` and `Model response result` entries around
+calls to the configured backend. Set `LOG_LEVEL=TRACE` for very-verbose
+streaming `Model stream chunk` entries. These logs may include prompts,
+extracted file text, tool definitions, and generated output, so keep them off
+in shared or production-like environments unless operators explicitly need
+payload-level diagnosis.
+
+`/metrics` completion logs are emitted at TRACE because scrapes are high-volume
+operational noise. Normal request paths continue to log completion records at
+INFO.
+
 ## Metrics
 
 The `/metrics` endpoint is Prometheus-compatible and is scraped by

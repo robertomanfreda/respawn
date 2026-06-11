@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from src.schemas.responses import ResponseRequest
 from src.services.id_generator import generate_id
 from src.services.response_history_builder import content_to_text
 from src.services.responses_compat import image_generation_disabled_by_choice, image_generation_requested, image_generation_required, image_generation_tools
+from src.services.tool_call_arguments import tool_call_arguments
 
 
 logger = logging.getLogger(__name__)
@@ -221,18 +221,7 @@ def _resolved_size(tool: dict[str, Any], *, settings: Settings) -> tuple[int, in
 
 
 def _prompt_from_tool_call(tool_call: dict[str, Any]) -> str:
-    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
-    arguments = function.get("arguments", "{}")
-    if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments or "{}")
-        except json.JSONDecodeError:
-            parsed = {}
-    elif isinstance(arguments, dict):
-        parsed = arguments
-    else:
-        parsed = {}
-    return _normalize_prompt(str(parsed.get("prompt") or ""))
+    return _normalize_prompt(str(tool_call_arguments(tool_call).get("prompt") or ""))
 
 
 def _validate_base64(value: str) -> None:

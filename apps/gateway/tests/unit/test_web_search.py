@@ -5,7 +5,14 @@ from src.adapters.web_search_base import WebSearchResult
 from src.config import Settings
 from src.schemas.errors import OpenAIError
 from src.schemas.responses import ResponseRequest
-from src.services.responses_compat import WEB_SEARCH_INTERNAL_TOOL_NAME, backend_function_tools, validate_text_responses_request, web_search_required, web_search_tools
+from src.services.responses_compat import (
+    WEB_SEARCH_INTERNAL_TOOL_NAME,
+    backend_function_tools,
+    tool_use_policy_instruction,
+    validate_text_responses_request,
+    web_search_required,
+    web_search_tools,
+)
 from src.services.web_search import WebSearchService, derive_web_search_query, url_citation_annotations, web_search_context
 
 
@@ -94,6 +101,16 @@ def test_web_search_auto_is_exposed_as_internal_backend_function():
     forced = ResponseRequest(input="Search the web for latest Respawn details", tools=[{"type": "web_search"}], tool_choice="required")
 
     assert backend_function_tools(forced) == []
+
+
+def test_web_search_auto_adds_general_tool_use_policy():
+    request = ResponseRequest(input="What is Kubernetes?", tools=[{"type": "web_search"}])
+
+    instruction = tool_use_policy_instruction(request)
+
+    assert instruction is not None
+    assert "current, recent, external, or source-backed information" in instruction
+    assert "answer normally without calling web_search" in instruction
 
 
 @pytest.mark.asyncio

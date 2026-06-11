@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import json
 import re
 from dataclasses import dataclass
 from time import perf_counter
@@ -16,6 +15,7 @@ from src.schemas.responses import ResponseRequest
 from src.services.id_generator import generate_id
 from src.services.response_history_builder import content_to_text
 from src.services.responses_compat import web_search_disabled_by_choice, web_search_requested, web_search_required, web_search_tools
+from src.services.tool_call_arguments import tool_call_arguments
 
 
 logger = logging.getLogger(__name__)
@@ -304,18 +304,7 @@ def _normalize_query(query: str) -> str:
 
 
 def _query_from_tool_call(tool_call: dict[str, Any]) -> str:
-    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
-    arguments = function.get("arguments", "{}")
-    if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments or "{}")
-        except json.JSONDecodeError:
-            parsed = {}
-    elif isinstance(arguments, dict):
-        parsed = arguments
-    else:
-        parsed = {}
-    return _normalize_query(str(parsed.get("query") or ""))
+    return _normalize_query(str(tool_call_arguments(tool_call).get("query") or ""))
 
 
 def _latest_user_text(input_value: Any) -> str:

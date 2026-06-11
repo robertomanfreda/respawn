@@ -1,6 +1,7 @@
 import json
 
 from src.adapters.mock_control import mock_metadata
+from tests.helpers import backend_tool_names
 
 
 def parse_sse_events(text):
@@ -186,6 +187,33 @@ def test_streaming_web_search_output_item_events(web_search_client):
     assert retrieved["output"] == terminal_response["output"]
 
 
+def test_streaming_web_search_followup_is_text_only_with_image_generation_available(web_search_and_image_generation_client):
+    with web_search_and_image_generation_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "input": "Search externally for the streaming routing fixture",
+            "tools": [{"type": "web_search"}, {"type": "image_generation", "quality": "low"}],
+            "metadata": mock_metadata(tool_call="web_search"),
+            "stream": True,
+            "store": True,
+        },
+    ) as response:
+        text = "".join(response.iter_text())
+
+    events = parse_sse_events(text)
+    terminal_response = events[-1]["data"]["response"]
+    assert events[-1]["event"] == "response.completed"
+    assert [item["type"] for item in terminal_response["output"]] == ["web_search_call", "message"]
+    assert web_search_and_image_generation_client.app.state.image_generation_backend.requests == []
+
+    payloads = web_search_and_image_generation_client.app.state.backend.payloads
+    assert "respawn_web_search" in backend_tool_names(payloads[0])
+    assert "respawn_image_generation" in backend_tool_names(payloads[0])
+    assert "tools" not in payloads[1]
+    assert "tool_choice" not in payloads[1]
+
+
 def test_streaming_web_search_failure_events(web_search_client):
     with web_search_client.stream(
         "POST",
@@ -214,6 +242,7 @@ def test_streaming_image_generation_output_item_events(image_generation_client):
         json={
             "input": "Generate image of a tiny stream house",
             "tools": [{"type": "image_generation", "quality": "low"}],
+            "tool_choice": {"type": "image_generation"},
             "metadata": mock_metadata(tool_call="image_generation"),
             "stream": True,
             "store": True,

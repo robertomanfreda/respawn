@@ -20,7 +20,7 @@ from src.adapters.ollama_backend import OllamaBackend
 from src.adapters.searxng_search import SearxngSearchBackend
 from src.api import chat, compatibility, files, health, metrics, models, prompt_templates, responses
 from src.config import get_settings
-from src.observability.logging import configure_logging
+from src.observability.logging import TRACE_LEVEL, configure_logging
 from src.observability.metrics import (
     ENDPOINT_REQUESTS,
     ERRORS,
@@ -45,6 +45,11 @@ SUPPORTED_WEB_SEARCH_BACKENDS = {"mock", "searxng"}
 SUPPORTED_IMAGE_GENERATION_BACKENDS = {"mock", "automatic1111", "comfyui"}
 
 
+def _unsupported_backend_message(setting_name: str, requested: str, supported_values: set[str]) -> str:
+    supported = ", ".join(sorted(supported_values))
+    return f"Unsupported {setting_name} '{requested}'. Supported values: {supported}."
+
+
 def build_backend(settings):
     """Create the configured model backend and fail fast on typos."""
     backend_name = settings.model_backend.lower()
@@ -52,8 +57,7 @@ def build_backend(settings):
         return OllamaBackend(settings.ollama_base_url, settings.backend_timeout_seconds)
     if backend_name == "mock":
         return MockBackend(settings.default_model)
-    supported = ", ".join(sorted(SUPPORTED_MODEL_BACKENDS))
-    raise ValueError(f"Unsupported MODEL_BACKEND '{settings.model_backend}'. Supported values: {supported}.")
+    raise ValueError(_unsupported_backend_message("MODEL_BACKEND", settings.model_backend, SUPPORTED_MODEL_BACKENDS))
 
 
 def build_web_search_backend(settings):
@@ -69,8 +73,7 @@ def build_web_search_backend(settings):
             timeout_seconds=settings.web_search_timeout_seconds,
             user_agent=settings.web_search_user_agent,
         )
-    supported = ", ".join(sorted(SUPPORTED_WEB_SEARCH_BACKENDS))
-    raise ValueError(f"Unsupported WEB_SEARCH_BACKEND '{settings.web_search_backend}'. Supported values: {supported}.")
+    raise ValueError(_unsupported_backend_message("WEB_SEARCH_BACKEND", settings.web_search_backend, SUPPORTED_WEB_SEARCH_BACKENDS))
 
 
 def build_image_generation_backend(settings) -> ImageGenerationBackend | None:
@@ -92,8 +95,7 @@ def build_image_generation_backend(settings) -> ImageGenerationBackend | None:
             timeout_seconds=settings.image_generation_timeout_seconds,
             model=settings.image_generation_model,
         )
-    supported = ", ".join(sorted(SUPPORTED_IMAGE_GENERATION_BACKENDS))
-    raise ValueError(f"Unsupported IMAGE_GENERATION_BACKEND '{settings.image_generation_backend}'. Supported values: {supported}.")
+    raise ValueError(_unsupported_backend_message("IMAGE_GENERATION_BACKEND", settings.image_generation_backend, SUPPORTED_IMAGE_GENERATION_BACKENDS))
 
 
 @asynccontextmanager
@@ -174,22 +176,23 @@ def create_app() -> FastAPI:
             if response.status_code >= 500:
                 OPERATIONAL_FAILURES.labels(component=_failure_component(error_code, feature, request), code=error_code).inc()
             response.headers["x-request-id"] = request_id
-            logger.info(
-                "HTTP request completed",
-                extra={
-                    "request_id": request_id,
-                    "response_id": response_id,
-                    "tenant": getattr(request.state, "tenant_id", None),
-                    "feature": feature,
-                    "backend": getattr(request.app.state.settings, "model_backend", None),
-                    "method": request.method,
-                    "path": path,
-                    "latency_ms": round(elapsed * 1000, 3),
-                    "status": response.status_code,
-                    "error_code": error_code if response.status_code >= 400 else None,
-                    "error_param": error_param,
-                },
-            )
+            log_extra = {
+                "request_id": request_id,
+                "response_id": response_id,
+                "tenant": getattr(request.state, "tenant_id", None),
+                "feature": feature,
+                "backend": getattr(request.app.state.settings, "model_backend", None),
+                "method": request.method,
+                "path": path,
+                "latency_ms": round(elapsed * 1000, 3),
+                "status": response.status_code,
+                "error_code": error_code if response.status_code >= 400 else None,
+                "error_param": error_param,
+            }
+            if feature == "metrics":
+                logger.log(TRACE_LEVEL, "HTTP request completed", extra=log_extra)
+            else:
+                logger.info("HTTP request completed", extra=log_extra)
             return response
 
         if request.method == "POST" and idempotency_key is not None:

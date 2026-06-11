@@ -37,13 +37,13 @@ def test_official_openai_python_sdk_create(tmp_path, monkeypatch):
 
     try:
         sdk = OpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key="local-dev-key")
-        response = sdk.responses.create(model="gpt-oss-120b", input="sdk create", text={"format": {"type": "text"}}, metadata={"sdk": "phase-1"})
+        response = sdk.responses.create(model="gpt-oss-120b", input="sdk create", text={"format": {"type": "text"}}, metadata={"sdk": "shape-roundtrip"})
         assert response.id.startswith("resp_")
         assert response.output_text == "Mock response: sdk create"
         body = response.model_dump()
         assert body["store"] is True
         assert body["text"]["format"]["type"] == "text"
-        assert body["metadata"] == {"sdk": "phase-1"}
+        assert body["metadata"] == {"sdk": "shape-roundtrip"}
     finally:
         server.should_exit = True
         thread.join(timeout=5)

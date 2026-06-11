@@ -4,7 +4,7 @@ from collections import Counter
 from typing import Any
 
 
-MANIFEST_VERSION = "phase-18"
+MANIFEST_VERSION = "compat-20"
 MANIFEST_SOURCE = "docs/COMPATIBILITY.md"
 
 
@@ -235,13 +235,22 @@ FEATURES: list[dict[str, Any]] = [
         "notes": "Function and namespace-wrapped function tools are protocol data only; Respawn never executes them.",
     },
     {
+        "id": "request.custom_tools",
+        "category": "request_field",
+        "surface": "tools entries with type=custom and namespace-wrapped custom tools",
+        "status": "supported",
+        "tags": ["tools"],
+        "benchmark_case": "responses.tools.custom_call",
+        "notes": "Custom tools are mapped to local backend function-call protocol data with a free-form input string. Clients execute tools and return custom_tool_call_output; Respawn never executes them.",
+    },
+    {
         "id": "request.web_search_tool",
         "category": "request_field",
         "surface": "tools entries with type=web_search or web_search_preview",
         "status": "supported_local",
         "tags": ["tools", "web_search"],
         "benchmark_case": "responses.web_search.basic",
-        "notes": "Respawn executes query-style local web search through the configured provider when WEB_SEARCH_ENABLED=true.",
+        "notes": "Respawn executes query-style local web search through the configured provider when WEB_SEARCH_ENABLED=true. In auto mode, the local web search tool is exposed whenever the request includes it, with a general tool-use policy for local backend selection.",
     },
     {
         "id": "request.web_search_filters",
@@ -268,7 +277,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["tools", "image_generation"],
         "benchmark_case": "responses.image_generation.basic",
-        "notes": "Respawn executes text-to-image generation through the configured local image backend, including ComfyUI, when IMAGE_GENERATION_ENABLED=true.",
+        "notes": "Respawn executes text-to-image generation through the configured local image backend, including ComfyUI, when IMAGE_GENERATION_ENABLED=true. In auto mode, the local image tool is exposed whenever the request includes it, matching OpenAI's Responses tool availability model; local backend tool-selection quality depends on the configured model.",
     },
     {
         "id": "request.image_generation_disabled_error",
@@ -282,11 +291,11 @@ FEATURES: list[dict[str, Any]] = [
     {
         "id": "request.tool_choice",
         "category": "request_field",
-        "surface": "tool_choice auto, none, required, forced function, allowed_tools, web_search, and image_generation choices",
+        "surface": "tool_choice auto, none, required, forced function/custom, allowed_tools, web_search, and image_generation choices",
         "status": "supported_local",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.tool_choice_forced_function",
-        "notes": "Function choices are mapped to the configured backend where possible. web_search and image_generation required/none choices are enforced locally before backend generation.",
+        "notes": "Function/custom choices are mapped to the configured backend where possible. web_search required/none choices are enforced locally before backend generation. image_generation required/none choices are enforced locally; auto mode leaves the tool available and does not classify prompt text in the gateway.",
     },
     {
         "id": "request.parallel_and_max_tool_calls",
@@ -300,11 +309,11 @@ FEATURES: list[dict[str, Any]] = [
     {
         "id": "request.unsupported_tool_categories",
         "category": "request_field",
-        "surface": "hosted MCP, custom free-form, shell, apply_patch, file/code/computer/internal tools, image edit/partial-image modes, and browser actions",
+        "surface": "hosted MCP, shell, apply_patch, file/code/computer/internal tools, image edit/partial-image modes, and browser actions",
         "status": "unsupported",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.unsupported_builtin_tools",
-        "notes": "Function protocol data, local query-style web_search, and local text-to-image image_generation are supported. Other hosted or local tool execution remains out of scope.",
+        "notes": "Function/custom protocol data, local query-style web_search, and local text-to-image image_generation are supported. Other hosted or local tool execution remains out of scope.",
     },
     {
         "id": "request.structured_output",
@@ -355,7 +364,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "supported_local",
         "tags": ["sdk", "state"],
         "benchmark_case": "responses.shape.metadata_retrieve",
-        "notes": "Accepted as opaque client telemetry metadata for Codex/SDK compatibility; it is stored with the request snapshot but is not forwarded to the model backend or exposed on response objects.",
+        "notes": "Accepted as opaque client telemetry metadata for agent/SDK compatibility; it is stored with the request snapshot but is not forwarded to the model backend or exposed on response objects.",
     },
     {
         "id": "request.prompt_templates",
@@ -594,13 +603,22 @@ FEATURES: list[dict[str, Any]] = [
         "notes": "Protocol items are stored and replayed without local execution.",
     },
     {
+        "id": "io.custom_tool_call_items",
+        "category": "input_output",
+        "surface": "custom_tool_call output items and custom_tool_call_output input items",
+        "status": "supported",
+        "tags": ["tools", "state"],
+        "benchmark_case": "responses.tools.custom_call_followup",
+        "notes": "Custom tool protocol items are stored and replayed through the local backend function-call adapter without local execution.",
+    },
+    {
         "id": "io.legacy_tool_result_unsupported",
         "category": "input_output",
         "surface": "legacy tool_result items",
         "status": "unsupported",
         "tags": ["tools", "state"],
         "benchmark_case": "responses.tools.unsupported_builtin_tools",
-        "notes": "Only current Responses function_call/function_call_output items are accepted.",
+        "notes": "Only current Responses function_call/function_call_output and custom_tool_call/custom_tool_call_output items are accepted.",
     },
     {
         "id": "state.function_tool_item_storage",
@@ -730,7 +748,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "unsupported",
         "tags": ["multimodal"],
         "benchmark_case": "responses.multimodal.input_audio_unsupported",
-        "notes": "Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription phase exists.",
+        "notes": "Audio remains a deliberate local exclusion until a dedicated audio/realtime/transcription implementation exists.",
     },
     {
         "id": "io.built_in_tool_items",
@@ -739,7 +757,7 @@ FEATURES: list[dict[str, Any]] = [
         "status": "unsupported",
         "tags": ["tools"],
         "benchmark_case": "responses.tools.unsupported_builtin_tools",
-        "notes": "Built-in/internal tool execution remains out of scope even after function-tool protocol support.",
+        "notes": "Built-in/internal tool execution remains out of scope even after function/custom-tool protocol support.",
     },
     {
         "id": "response.core_shape",

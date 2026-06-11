@@ -14,6 +14,7 @@ from src.services.include_expansions import REASONING_ENCRYPTED_CONTENT, validat
 from src.services.model_capabilities import reasoning_efforts_for_model
 from src.services.response_history_builder import content_to_text
 from src.services.reasoning_summaries import DeterministicReasoningSummaryProvider, ReasoningSummaryProvider, estimate_text_tokens
+from src.services.tool_call_arguments import arguments_to_string
 
 
 UNSUPPORTED_FIELDS = {
@@ -35,6 +36,9 @@ WEB_SEARCH_CONTEXT_SIZES = {"low", "medium", "high"}
 WEB_SEARCH_TOOL_FIELDS = {"type", "search_context_size", "filters", "user_location", "external_web_access"}
 WEB_SEARCH_FILTER_FIELDS = {"allowed_domains", "blocked_domains"}
 WEB_SEARCH_MAX_DOMAINS = 100
+TOOL_USE_POLICY_PREFIX = "Respawn tool-use policy:"
+CUSTOM_TOOL_TYPE = "custom"
+CUSTOM_TOOL_INPUT_FIELD = "input"
 IMAGE_GENERATION_TOOL_TYPE = "image_generation"
 IMAGE_GENERATION_INTERNAL_TOOL_NAME = "respawn_image_generation"
 IMAGE_GENERATION_TOOL_FIELDS = {"type", "size", "quality", "output_format", "background", "partial_images", "action", "moderation"}
@@ -42,7 +46,7 @@ IMAGE_GENERATION_QUALITIES = {"auto", "low", "medium", "high"}
 IMAGE_GENERATION_OUTPUT_FORMATS = {"png"}
 IMAGE_GENERATION_BACKGROUNDS = {"auto", "opaque"}
 IMAGE_GENERATION_ACTIONS = {"auto", "generate"}
-PROTOCOL_INPUT_ITEM_TYPES = {"web_search_call", "image_generation_call"}
+PROTOCOL_INPUT_ITEM_TYPES = {"web_search_call", "image_generation_call", "custom_tool_call", "custom_tool_call_output"}
 IMAGE_GENERATION_SIZE_RE = re.compile(r"^([1-9][0-9]{1,4})x([1-9][0-9]{1,4})$")
 METADATA_MAX_PAIRS = 16
 METADATA_KEY_MAX_LENGTH = 64
@@ -156,6 +160,10 @@ def input_items_from_request(request_json: dict[str, Any]) -> list[dict[str, Any
             items.append(_web_search_call_item(item, fallback_id=item_id))
         elif item_type == "image_generation_call":
             items.append(_image_generation_call_item(item, fallback_id=item_id))
+        elif item_type == "custom_tool_call":
+            items.append(_custom_tool_call_item(item, fallback_id=f"input_{index}"))
+        elif item_type == "custom_tool_call_output":
+            items.append(_custom_tool_call_output_item(item, fallback_id=f"input_{index}"))
         elif item_type == "tool_result":
             _unsupported(f"input.{index}.type", "Legacy tool_result input items are not supported by Respawn.")
         elif item_type == "reasoning":
@@ -210,21 +218,21 @@ def estimate_input_tokens(request: ResponseRequest, chain: list[dict[str, Any]] 
     return _estimate_tokens("\n".join(part for part in parts if part))
 
 
-def backend_function_tools(request: ResponseRequest) -> list[dict[str, Any]]:
-    tools = _normalized_function_tools(request.tools)
+def backend_function_tools(request: ResponseRequest, chain: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    tools = _normalized_backend_tools(request.tools)
     tool_choice = request.tool_choice
     backend_tools: list[dict[str, Any]]
     if isinstance(tool_choice, str) or tool_choice is None:
-        backend_tools = [_backend_function_tool(tool) for tool in tools]
+        backend_tools = [_backend_tool(tool) for tool in tools]
     elif not isinstance(tool_choice, dict) or tool_choice.get("type") != "allowed_tools":
-        backend_tools = [_backend_function_tool(tool) for tool in tools]
+        backend_tools = [_backend_tool(tool) for tool in tools]
     else:
-        allowed_names = {_tool_choice_backend_function_name(tool) for tool in tool_choice.get("tools") or [] if isinstance(tool, dict)}
-        backend_tools = [_backend_function_tool(tool) for tool in tools if tool["function"]["name"] in allowed_names]
+        allowed_names = {_tool_choice_backend_tool_name(tool) for tool in tool_choice.get("tools") or [] if isinstance(tool, dict)}
+        backend_tools = [_backend_tool(tool) for tool in tools if str(tool["function"]["name"]) in allowed_names]
 
     if _include_internal_web_search_tool(request):
         backend_tools.append(_backend_web_search_tool())
-    if _include_internal_image_generation_tool(request):
+    if _include_internal_image_generation_tool(request, chain=chain):
         backend_tools.append(_backend_image_generation_tool())
     return backend_tools
 
@@ -239,7 +247,10 @@ def backend_tool_choice(request: ResponseRequest) -> str | dict[str, Any] | None
         return None
     choice_type = tool_choice.get("type")
     if choice_type == "function":
-        name = _tool_choice_backend_function_name(tool_choice)
+        name = _tool_choice_backend_tool_name(tool_choice)
+        return {"type": "function", "function": {"name": name}}
+    if choice_type == CUSTOM_TOOL_TYPE:
+        name = _tool_choice_backend_tool_name(tool_choice)
         return {"type": "function", "function": {"name": name}}
     if choice_type == "allowed_tools":
         return tool_choice.get("mode", "auto")
@@ -326,6 +337,26 @@ def tool_choice_instruction(request: ResponseRequest) -> str | None:
     return None
 
 
+def tool_use_policy_instruction(request: ResponseRequest) -> str | None:
+    if isinstance(request.tool_choice, dict) and request.tool_choice.get("type") == "allowed_tools":
+        return None
+    policies: list[str] = []
+    if web_search_requested(request) and not web_search_disabled_by_choice(request) and not web_search_required(request):
+        policies.append(
+            "The web_search tool is available in auto mode. Call respawn_web_search only when the latest user request needs current, recent, external, or source-backed information. "
+            "For stable general knowledge, coding tasks, file operations, or requests that do not need external sources, answer normally without calling web_search."
+        )
+    if image_generation_requested(request) and not image_generation_disabled_by_choice(request) and not image_generation_required(request):
+        policies.append(
+            "The image_generation tool is available in auto mode. Call respawn_image_generation only when the latest user request asks to create, edit, or revise visual output. "
+            "For ordinary questions, explanations, coding tasks, file operations, or non-visual requests, answer normally without calling image_generation. "
+            "If you do not call image_generation, do not claim that an image was generated and do not show an image placeholder."
+        )
+    if not policies:
+        return None
+    return f"{TOOL_USE_POLICY_PREFIX}\n" + "\n".join(policies)
+
+
 def function_call_output_item(item_id: str, *, call_id: str, output: Any, status: str = "completed") -> dict[str, Any]:
     return {
         "id": item_id,
@@ -343,7 +374,7 @@ def function_call_output_text(output: Any) -> str:
 
 
 def function_call_output_name(function_name: str, request: ResponseRequest) -> dict[str, str]:
-    lookup = _function_tool_call_lookup(request)
+    lookup = _tool_call_lookup(request)
     candidate = lookup.get(function_name)
     if candidate is None:
         candidate = lookup.get(_canonical_flat_tool_name(function_name))
@@ -356,7 +387,7 @@ def function_call_output_name(function_name: str, request: ResponseRequest) -> d
     matches = by_original.get(function_name, [])
     if len(matches) == 1:
         return dict(matches[0])
-    return {"name": function_name}
+    return {"type": "function", "name": function_name}
 
 
 def function_call_output_ids(input_value: Any) -> set[str]:
@@ -365,7 +396,7 @@ def function_call_output_ids(input_value: Any) -> set[str]:
     return {
         str(item.get("call_id"))
         for item in input_value
-        if isinstance(item, dict) and item.get("type") == "function_call_output" and item.get("call_id")
+        if isinstance(item, dict) and item.get("type") in {"function_call_output", "custom_tool_call_output"} and item.get("call_id")
     }
 
 
@@ -373,11 +404,11 @@ def available_function_call_ids(chain: list[dict[str, Any]], input_value: Any) -
     call_ids: set[str] = set()
     for response in chain or []:
         for item in response.get("output_json") or []:
-            if isinstance(item, dict) and item.get("type") == "function_call" and item.get("call_id"):
+            if isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"} and item.get("call_id"):
                 call_ids.add(str(item["call_id"]))
     if isinstance(input_value, list):
         for item in input_value:
-            if isinstance(item, dict) and item.get("type") == "function_call" and item.get("call_id"):
+            if isinstance(item, dict) and item.get("type") in {"function_call", "custom_tool_call"} and item.get("call_id"):
                 call_ids.add(str(item["call_id"]))
     return call_ids
 
@@ -390,7 +421,7 @@ def validate_function_call_outputs_match(chain: list[dict[str, Any]], input_valu
     missing = sorted(outputs - available)
     if missing:
         raise OpenAIError(
-            "function_call_output call_id does not match a function_call in the current input or previous response chain.",
+            "Tool call output call_id does not match a tool call in the current input or previous response chain.",
             param="input",
             code="invalid_tool_call_output",
         )
@@ -509,7 +540,7 @@ def _function_call_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, 
         "type": "function_call",
         "call_id": str(item["call_id"]),
         "name": str(item["name"]),
-        "arguments": _arguments_to_string(item.get("arguments", "{}")),
+        "arguments": arguments_to_string(item.get("arguments", "{}")),
         "status": item.get("status", "completed"),
     }
     if item.get("namespace") is not None:
@@ -524,6 +555,30 @@ def _function_call_output_item(item: dict[str, Any], *, fallback_id: str) -> dic
         output=item.get("output", ""),
         status=item.get("status", "completed"),
     )
+
+
+def _custom_tool_call_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, Any]:
+    normalized = {
+        "id": str(item.get("id") or fallback_id),
+        "type": "custom_tool_call",
+        "call_id": str(item["call_id"]),
+        "name": str(item["name"]),
+        "input": str(item.get("input") or ""),
+        "status": item.get("status", "completed"),
+    }
+    if item.get("namespace") is not None:
+        normalized["namespace"] = str(item["namespace"])
+    return normalized
+
+
+def _custom_tool_call_output_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, Any]:
+    return {
+        "id": str(item.get("id") or fallback_id),
+        "type": "custom_tool_call_output",
+        "call_id": str(item["call_id"]),
+        "output": item.get("output", ""),
+        "status": item.get("status", "completed"),
+    }
 
 
 def _web_search_call_item(item: dict[str, Any], *, fallback_id: str) -> dict[str, Any]:
@@ -624,11 +679,11 @@ def _validate_service_tier(service_tier: str | None) -> None:
 
 def _validate_function_tool_protocol(request: ResponseRequest) -> None:
     names = []
-    for normalized in _normalized_function_tools(request.tools):
+    for normalized in _normalized_backend_tools(request.tools):
         names.append(normalized["function"]["name"])
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
-        raise OpenAIError(f"Duplicate function tool name '{duplicates[0]}'.", param="tools", code="invalid_tool")
+        raise OpenAIError(f"Duplicate tool name '{duplicates[0]}'.", param="tools", code="invalid_tool")
 
     _validate_web_search_tools(request)
     _validate_image_generation_tools(request)
@@ -646,6 +701,14 @@ def _validate_function_tool_protocol(request: ResponseRequest) -> None:
 
 
 def _normalized_function_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [tool for tool in _normalized_backend_tools(tools) if tool.get("type") == "function"]
+
+
+def _normalized_custom_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [tool for tool in _normalized_backend_tools(tools) if tool.get("type") == CUSTOM_TOOL_TYPE]
+
+
+def _normalized_backend_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for index, tool in enumerate(tools):
         param = f"tools.{index}"
@@ -655,6 +718,9 @@ def _normalized_function_tools(tools: list[dict[str, Any]]) -> list[dict[str, An
         if tool_type == "function":
             normalized.append(_normalized_function_tool_body(tool, param=param))
             continue
+        if tool_type == CUSTOM_TOOL_TYPE:
+            normalized.append(_normalized_custom_tool_body(tool, param=param))
+            continue
         if tool_type == "namespace":
             normalized.extend(_normalized_namespace_tools(tool, param=param))
             continue
@@ -663,7 +729,7 @@ def _normalized_function_tools(tools: list[dict[str, Any]]) -> list[dict[str, An
         if tool_type == IMAGE_GENERATION_TOOL_TYPE:
             continue
         FUNCTION_TOOL_UNSUPPORTED.labels(category=str(tool_type or "missing")).inc()
-        _unsupported(f"{param}.type", f"Tool type '{tool_type}' is not supported. Respawn supports function tools as protocol data only.")
+        _unsupported(f"{param}.type", f"Tool type '{tool_type}' is not supported. Respawn supports function/custom tools as protocol data only.")
     return normalized
 
 
@@ -676,10 +742,20 @@ def _normalized_namespace_tools(tool: dict[str, Any], *, param: str) -> list[dic
     tools = tool.get("tools", [])
     if not isinstance(tools, list):
         raise OpenAIError("Namespace tool tools must be a list.", param=f"{param}.tools")
-    return [
-        _normalized_function_tool_body(inner_tool, param=f"{param}.tools.{index}", namespace=str(namespace))
-        for index, inner_tool in enumerate(tools)
-    ]
+    normalized: list[dict[str, Any]] = []
+    for index, inner_tool in enumerate(tools):
+        inner_param = f"{param}.tools.{index}"
+        if not isinstance(inner_tool, dict):
+            raise OpenAIError("tools entries must be objects.", param=inner_param)
+        tool_type = inner_tool.get("type")
+        if tool_type == "function":
+            normalized.append(_normalized_function_tool_body(inner_tool, param=inner_param, namespace=str(namespace)))
+        elif tool_type == CUSTOM_TOOL_TYPE:
+            normalized.append(_normalized_custom_tool_body(inner_tool, param=inner_param, namespace=str(namespace)))
+        else:
+            FUNCTION_TOOL_UNSUPPORTED.labels(category=str(tool_type or "missing")).inc()
+            _unsupported(f"{inner_param}.type", f"Tool type '{tool_type}' is not supported in a namespace.")
+    return normalized
 
 
 def _normalized_function_tool_body(tool: dict[str, Any], *, param: str, namespace: str | None = None) -> dict[str, Any]:
@@ -688,7 +764,7 @@ def _normalized_function_tool_body(tool: dict[str, Any], *, param: str, namespac
     tool_type = tool.get("type")
     if tool_type != "function":
         FUNCTION_TOOL_UNSUPPORTED.labels(category=str(tool_type or "missing")).inc()
-        _unsupported(f"{param}.type", f"Tool type '{tool_type}' is not supported. Respawn supports function tools as protocol data only.")
+        _unsupported(f"{param}.type", f"Tool type '{tool_type}' is not supported. Respawn supports function/custom tools as protocol data only.")
 
     function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
     name = function.get("name")
@@ -720,7 +796,72 @@ def _normalized_function_tool_body(tool: dict[str, Any], *, param: str, namespac
     return normalized
 
 
-def _backend_function_tool(tool: dict[str, Any]) -> dict[str, Any]:
+def _normalized_custom_tool_body(tool: dict[str, Any], *, param: str, namespace: str | None = None) -> dict[str, Any]:
+    if not isinstance(tool, dict):
+        raise OpenAIError("tools entries must be objects.", param=param)
+    tool_type = tool.get("type")
+    if tool_type != CUSTOM_TOOL_TYPE:
+        FUNCTION_TOOL_UNSUPPORTED.labels(category=str(tool_type or "missing")).inc()
+        _unsupported(f"{param}.type", f"Tool type '{tool_type}' is not supported. Respawn supports function/custom tools as protocol data only.")
+
+    name = tool.get("name")
+    _validate_tool_name(name, param=f"{param}.name")
+    description = tool.get("description")
+    if description is not None and not isinstance(description, str):
+        raise OpenAIError("Custom tool description must be a string.", param=f"{param}.description")
+    defer_loading = tool.get("defer_loading")
+    if defer_loading is not None and not isinstance(defer_loading, bool):
+        raise OpenAIError("Custom tool defer_loading must be a boolean.", param=f"{param}.defer_loading")
+    format_config = tool.get("format")
+    if format_config is not None:
+        _validate_custom_tool_format(format_config, param=f"{param}.format")
+
+    original_name = str(name)
+    backend_name = _flat_tool_name(namespace, original_name)
+    parameters = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            CUSTOM_TOOL_INPUT_FIELD: {
+                "type": "string",
+                "description": "Free-form input for the custom tool call.",
+            }
+        },
+        "required": [CUSTOM_TOOL_INPUT_FIELD],
+    }
+    normalized_function: dict[str, Any] = {"name": backend_name, "parameters": parameters}
+    if description is not None:
+        normalized_function["description"] = description
+    normalized = {"type": CUSTOM_TOOL_TYPE, "function": normalized_function, "name": backend_name, "original_name": original_name}
+    if format_config is not None:
+        normalized["format"] = dict(format_config)
+    if namespace is not None:
+        normalized["namespace"] = namespace
+    return normalized
+
+
+def _validate_custom_tool_format(format_config: Any, *, param: str) -> None:
+    if not isinstance(format_config, dict):
+        raise OpenAIError("Custom tool format must be an object.", param=param)
+    format_type = format_config.get("type", "text")
+    if format_type == "text":
+        unsupported = sorted(set(format_config) - {"type"})
+        if unsupported:
+            _unsupported(f"{param}.{unsupported[0]}", f"custom text format field '{unsupported[0]}' is not supported.")
+        return
+    if format_type == "grammar":
+        unsupported = sorted(set(format_config) - {"type", "definition", "syntax"})
+        if unsupported:
+            _unsupported(f"{param}.{unsupported[0]}", f"custom grammar format field '{unsupported[0]}' is not supported.")
+        if not isinstance(format_config.get("definition"), str) or not format_config.get("definition"):
+            raise OpenAIError("Custom grammar format requires definition.", param=f"{param}.definition")
+        if format_config.get("syntax") not in {"lark", "regex"}:
+            raise OpenAIError("Custom grammar format syntax must be lark or regex.", param=f"{param}.syntax")
+        return
+    _unsupported(f"{param}.type", f"Custom tool format type '{format_type}' is not supported.")
+
+
+def _backend_tool(tool: dict[str, Any]) -> dict[str, Any]:
     return {"type": "function", "function": dict(tool["function"]), "name": str(tool["function"]["name"])}
 
 
@@ -776,7 +917,7 @@ def _backend_image_generation_tool() -> dict[str, Any]:
     }
 
 
-def _include_internal_image_generation_tool(request: ResponseRequest) -> bool:
+def _include_internal_image_generation_tool(request: ResponseRequest, *, chain: list[dict[str, Any]] | None = None) -> bool:
     if not image_generation_requested(request) or image_generation_disabled_by_choice(request):
         return False
     if image_generation_required(request):
@@ -822,8 +963,17 @@ def _validate_tool_choice(tool_choice: str | dict[str, Any] | None, names: list[
         namespace = _tool_choice_function_namespace(tool_choice)
         if namespace is not None:
             _validate_tool_name(namespace, param="tool_choice.namespace")
-        if _tool_choice_backend_function_name(tool_choice) not in names:
+        if _tool_choice_backend_tool_name(tool_choice) not in names:
             raise OpenAIError("tool_choice references an unknown function tool.", param="tool_choice.name", code="invalid_tool_choice")
+        return
+    if choice_type == CUSTOM_TOOL_TYPE:
+        name = _tool_choice_function_name(tool_choice)
+        _validate_tool_name(name, param="tool_choice.name")
+        namespace = _tool_choice_function_namespace(tool_choice)
+        if namespace is not None:
+            _validate_tool_name(namespace, param="tool_choice.namespace")
+        if _tool_choice_backend_tool_name(tool_choice) not in names:
+            raise OpenAIError("tool_choice references an unknown custom tool.", param="tool_choice.name", code="invalid_tool_choice")
         return
     if choice_type == "allowed_tools":
         mode = tool_choice.get("mode", "auto")
@@ -833,31 +983,37 @@ def _validate_tool_choice(tool_choice: str | dict[str, Any] | None, names: list[
         if not isinstance(tools, list) or not tools:
             raise OpenAIError("tool_choice.allowed_tools requires a non-empty tools list.", param="tool_choice.tools")
         for index, tool in enumerate(tools):
-            if not isinstance(tool, dict) or tool.get("type") != "function":
-                _unsupported(f"tool_choice.tools.{index}.type", "Only function tools can be listed in allowed_tools.")
+            if not isinstance(tool, dict) or tool.get("type") not in {"function", CUSTOM_TOOL_TYPE}:
+                _unsupported(f"tool_choice.tools.{index}.type", "Only function/custom tools can be listed in allowed_tools.")
             name = tool.get("name")
             _validate_tool_name(name, param=f"tool_choice.tools.{index}.name")
             namespace = _tool_choice_function_namespace(tool)
             if namespace is not None:
                 _validate_tool_name(namespace, param=f"tool_choice.tools.{index}.namespace")
-            if _tool_choice_backend_function_name(tool) not in names:
-                raise OpenAIError("allowed_tools references an unknown function tool.", param=f"tool_choice.tools.{index}.name", code="invalid_tool_choice")
+            if _tool_choice_backend_tool_name(tool) not in names:
+                raise OpenAIError("allowed_tools references an unknown function/custom tool.", param=f"tool_choice.tools.{index}.name", code="invalid_tool_choice")
         return
     _unsupported("tool_choice.type", f"Tool choice type '{choice_type}' is not supported.")
 
 
 def _tool_choice_function_name(tool_choice: dict[str, Any]) -> str:
     function = tool_choice.get("function") if isinstance(tool_choice.get("function"), dict) else {}
-    return str(tool_choice.get("name") or function.get("name") or "")
+    custom = tool_choice.get("custom") if isinstance(tool_choice.get("custom"), dict) else {}
+    return str(tool_choice.get("name") or function.get("name") or custom.get("name") or "")
 
 
 def _tool_choice_function_namespace(tool_choice: dict[str, Any]) -> str | None:
     function = tool_choice.get("function") if isinstance(tool_choice.get("function"), dict) else {}
-    namespace = tool_choice.get("namespace") or function.get("namespace")
+    custom = tool_choice.get("custom") if isinstance(tool_choice.get("custom"), dict) else {}
+    namespace = tool_choice.get("namespace") or function.get("namespace") or custom.get("namespace")
     return str(namespace) if namespace is not None else None
 
 
 def _tool_choice_backend_function_name(tool_choice: dict[str, Any]) -> str:
+    return _tool_choice_backend_tool_name(tool_choice)
+
+
+def _tool_choice_backend_tool_name(tool_choice: dict[str, Any]) -> str:
     return _flat_tool_name(_tool_choice_function_namespace(tool_choice), _tool_choice_function_name(tool_choice))
 
 
@@ -865,6 +1021,8 @@ def _tool_choice_requires_call(tool_choice: str | dict[str, Any] | None) -> bool
     if tool_choice == "required":
         return True
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        return True
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == CUSTOM_TOOL_TYPE:
         return True
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "allowed_tools" and tool_choice.get("mode") == "required":
         return True
@@ -1022,7 +1180,7 @@ def _validate_function_call_item(item: dict[str, Any], *, param: str) -> None:
     if item.get("namespace") is not None:
         _validate_tool_name(item.get("namespace"), param=f"{param}.namespace")
     arguments = item.get("arguments", "{}")
-    arguments_string = _arguments_to_string(arguments)
+    arguments_string = arguments_to_string(arguments)
     _validate_json_arguments(arguments_string, param=f"{param}.arguments")
 
 
@@ -1043,6 +1201,21 @@ def _validate_protocol_input_item(item: dict[str, Any], *, param: str) -> None:
     if item_type == "image_generation_call":
         if item.get("result") is not None and not isinstance(item.get("result"), str):
             raise OpenAIError("image_generation_call input items require result to be a string.", param=f"{param}.result")
+        return
+    if item_type == "custom_tool_call":
+        if not item.get("call_id"):
+            raise OpenAIError("custom_tool_call input items require call_id.", param=f"{param}.call_id")
+        _validate_tool_name(item.get("name"), param=f"{param}.name")
+        if item.get("namespace") is not None:
+            _validate_tool_name(item.get("namespace"), param=f"{param}.namespace")
+        if not isinstance(item.get("input", ""), str):
+            raise OpenAIError("custom_tool_call input must be a string.", param=f"{param}.input")
+        return
+    if item_type == "custom_tool_call_output":
+        if not item.get("call_id"):
+            raise OpenAIError("custom_tool_call_output input items require call_id.", param=f"{param}.call_id")
+        if "output" not in item:
+            raise OpenAIError("custom_tool_call_output input items require output.", param=f"{param}.output")
         return
 
 
@@ -1070,13 +1243,6 @@ def _validate_reasoning_item(item: dict[str, Any], *, param: str) -> None:
 def _validate_tool_name(name: Any, *, param: str) -> None:
     if not isinstance(name, str) or not FUNCTION_TOOL_NAME_RE.fullmatch(name):
         raise OpenAIError("Function tool names must be 1-64 characters and contain only letters, numbers, underscores, and hyphens.", param=param, code="invalid_tool")
-
-
-def _arguments_to_string(arguments: Any) -> str:
-    if isinstance(arguments, str):
-        return arguments
-    return json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
-
 
 def _validate_json_arguments(arguments: str, *, param: str) -> None:
     try:
@@ -1147,9 +1313,13 @@ def _canonical_flat_tool_name(name: str) -> str:
 
 
 def _function_tool_call_lookup(request: ResponseRequest) -> dict[str, dict[str, str]]:
+    return {key: value for key, value in _tool_call_lookup(request).items() if value.get("type") == "function"}
+
+
+def _tool_call_lookup(request: ResponseRequest) -> dict[str, dict[str, str]]:
     lookup: dict[str, dict[str, str]] = {}
-    for tool in _normalized_function_tools(request.tools):
-        entry = {"name": str(tool.get("original_name") or tool["function"]["name"])}
+    for tool in _normalized_backend_tools(request.tools):
+        entry = {"type": str(tool.get("type") or "function"), "name": str(tool.get("original_name") or tool["function"]["name"])}
         if tool.get("namespace") is not None:
             entry["namespace"] = str(tool["namespace"])
         lookup[str(tool["function"]["name"])] = entry
