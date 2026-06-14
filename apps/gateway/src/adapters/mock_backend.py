@@ -34,11 +34,24 @@ class MockBackend(ModelBackend):
             await asyncio.sleep(float(delay_seconds))
 
         if schema:
-            if options.get("structured_output") == "always_invalid":
+            structured_output_mode = options.get("structured_output")
+            if structured_output_mode == "always_invalid":
                 content = "not valid json"
                 return ChatCompletionResult(content=content, usage=_usage(messages, content))
             if payload.get("_respawn_repair_attempt"):
-                content = json.dumps(example_for_schema(schema), separators=(",", ":"))
+                if structured_output_mode == "numeric_range_repair":
+                    content = json.dumps(
+                        {"items": [{"id": "item_001", "label": "Keep original label", "rating": 0.9}]},
+                        separators=(",", ":"),
+                    )
+                else:
+                    content = json.dumps(example_for_schema(schema), separators=(",", ":"))
+                return ChatCompletionResult(content=content, usage=_usage(messages, content))
+            if structured_output_mode == "numeric_range_repair":
+                content = json.dumps(
+                    {"items": [{"id": "item_001", "label": "Keep original label", "rating": 9}]},
+                    separators=(",", ":"),
+                )
                 return ChatCompletionResult(content=content, usage=_usage(messages, content))
             content = "not valid json"
             return ChatCompletionResult(content=content, usage=_usage(messages, content))

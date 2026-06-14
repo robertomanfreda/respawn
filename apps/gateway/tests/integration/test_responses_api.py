@@ -2209,6 +2209,68 @@ def test_structured_output_repairs_once(client):
     assert response.json()["output"][0]["content"][0]["text"] == "{}"
 
 
+def test_structured_output_repair_prompt_is_conservative_for_numeric_range(client):
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "label": {"type": "string"},
+                        "rating": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                    "required": ["id", "label", "rating"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+    response = client.post(
+        "/v1/responses",
+        json={
+            "input": "repair a generic numeric range",
+            "metadata": mock_metadata(structured_output="numeric_range_repair"),
+            "response_format": {"type": "json_schema", "json_schema": {"schema": schema}},
+        },
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.json()["output_text"]) == {
+        "items": [
+            {
+                "id": "item_001",
+                "label": "Keep original label",
+                "rating": 0.9,
+            }
+        ]
+    }
+
+    repair_payload = client.app.state.backend.payloads[-1]
+    assert repair_payload["_respawn_repair_attempt"] is True
+    assert json.loads(repair_payload["messages"][-2]["content"]) == {
+        "items": [
+            {
+                "id": "item_001",
+                "label": "Keep original label",
+                "rating": 9,
+            }
+        ]
+    }
+    repair_prompt = repair_payload["messages"][-1]["content"]
+    assert "schema repair only, not task re-execution" in repair_prompt
+    assert "Do not add new objects, array items" in repair_prompt
+    assert "Preserve existing object identities" in repair_prompt
+    assert "list item order" in repair_prompt
+    assert "Only change fields that are invalid according to the schema" in repair_prompt
+    assert "0-10 score" in repair_prompt
+    assert "0.0..1.0" in repair_prompt
+
+
 def test_structured_output_accepts_sdk_text_format(client):
     response = client.post(
         "/v1/responses",
