@@ -32,10 +32,27 @@ def validate_text_against_schema(text: str, schema: dict[str, Any] | None) -> No
 
 
 def repair_instruction(schema: dict[str, Any]) -> str:
+    schema_text = json.dumps(schema, separators=(",", ":"))
     return (
-        "The previous assistant output was not valid for the requested JSON schema. "
-        "Return only valid JSON with no markdown or commentary. "
-        f"JSON schema: {json.dumps(schema, separators=(',', ':'))}"
+        "The previous assistant output was not valid for the requested JSON schema.\n\n"
+        "Repair rules:\n"
+        "- Your task is schema repair only, not task re-execution.\n"
+        "- Preserve the original output's semantic meaning.\n"
+        "- Preserve the same top-level JSON shape whenever possible.\n"
+        "- Preserve existing object identities, ids, labels, names, and list item order whenever possible.\n"
+        "- Do not add new objects, array items, facts, labels, names, or user-facing semantic content.\n"
+        "- Do not remove existing objects or array items unless they cannot be represented in the requested schema.\n"
+        "- Do not reinterpret the original user prompt.\n"
+        "- Do not improve, enrich, summarize, complete, or extend the previous assistant output.\n"
+        "- Only change fields that are invalid according to the schema: missing required fields, wrong types, malformed values, enum mismatches, "
+        "out-of-range numbers, additional forbidden properties, or invalid nesting.\n"
+        "- When a value can be repaired mechanically, repair it mechanically instead of regenerating the content.\n"
+        "- For numeric fields constrained to 0.0..1.0, if the previous output clearly used a 0-10 score, convert it mechanically to 0.0..1.0, "
+        "for example 9 -> 0.9 and 6 -> 0.6.\n"
+        "- If a field is missing and cannot be inferred directly from the existing output without adding new semantic content, use the minimal "
+        "schema-valid neutral value where possible.\n"
+        "- Return only valid JSON with no markdown or commentary.\n\n"
+        f"JSON schema: {schema_text}"
     )
 
 
