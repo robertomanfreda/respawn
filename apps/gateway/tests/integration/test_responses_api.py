@@ -620,11 +620,47 @@ def test_reasoning_xhigh_requires_model_capability(client, tmp_path, monkeypatch
     assert accepted.json()["reasoning"]["effort"] == "xhigh"
 
 
+def test_reasoning_effort_requires_explicit_model_capability(tmp_path, monkeypatch):
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'reasoning_no_efforts.db'}",
+        MODEL_CAPABILITIES="gpt-oss-120b=text,reasoning",
+    ) as client:
+        summary_only = client.post("/v1/responses", json={"input": "summary please", "reasoning": {"summary": "auto"}})
+        implicit_effort = client.post("/v1/responses", json={"input": "low please", "reasoning": {"effort": "low"}})
+
+    with configured_client(
+        tmp_path,
+        monkeypatch,
+        DATABASE_URL=f"sqlite+aiosqlite:///{tmp_path / 'reasoning_low_only.db'}",
+        MODEL_CAPABILITIES="gpt-oss-120b=text,reasoning,reasoning-effort-low",
+    ) as client:
+        explicit_effort = client.post("/v1/responses", json={"input": "low please", "reasoning": {"effort": "low"}})
+        missing_effort = client.post("/v1/responses", json={"input": "medium please", "reasoning": {"effort": "medium"}})
+
+    assert summary_only.status_code == 200
+    assert implicit_effort.status_code == 400
+    assert implicit_effort.json()["error"]["code"] == "unsupported_model_capability"
+    assert implicit_effort.json()["error"]["param"] == "reasoning.effort"
+    assert explicit_effort.status_code == 200
+    assert explicit_effort.json()["reasoning"]["effort"] == "low"
+    assert missing_effort.status_code == 400
+    assert missing_effort.json()["error"]["code"] == "unsupported_model_capability"
+    assert missing_effort.json()["error"]["param"] == "reasoning.effort"
+
+
 def test_reasoning_effort_and_summary_values_are_validated(client):
-    for effort in ("none", "minimal", "low", "medium", "high"):
+    for effort in ("low", "medium", "high"):
         response = client.post("/v1/responses", json={"input": f"effort {effort}", "reasoning": {"effort": effort}})
         assert response.status_code == 200
         assert response.json()["reasoning"]["effort"] == effort
+
+    for effort in ("none", "minimal"):
+        unsupported = client.post("/v1/responses", json={"input": f"effort {effort}", "reasoning": {"effort": effort}})
+        assert unsupported.status_code == 400
+        assert unsupported.json()["error"]["code"] == "unsupported_model_capability"
+        assert unsupported.json()["error"]["param"] == "reasoning.effort"
 
     for summary in ("auto", "concise", "detailed"):
         response = client.post("/v1/responses", json={"input": f"summary {summary}", "reasoning": {"effort": "low", "summary": summary}})

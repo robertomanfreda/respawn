@@ -11,7 +11,7 @@ from src.schemas.errors import OpenAIError
 from src.schemas.responses import ResponseRequest
 from src.services.context_management import validate_compaction_item, validate_context_management
 from src.services.include_expansions import REASONING_ENCRYPTED_CONTENT, validate_include_values
-from src.services.model_capabilities import reasoning_efforts_for_model
+from src.services.model_capabilities import reasoning_efforts_for_model, reasoning_supported_for_model
 from src.services.response_history_builder import content_to_text
 from src.services.reasoning_summaries import DeterministicReasoningSummaryProvider, ReasoningSummaryProvider, estimate_text_tokens
 from src.services.tool_call_arguments import arguments_to_string
@@ -80,8 +80,7 @@ def validate_text_responses_request(request: ResponseRequest) -> None:
 def validate_reasoning_capabilities(request: ResponseRequest, *, model: str, settings: Settings) -> None:
     if request.reasoning is None:
         return
-    efforts = reasoning_efforts_for_model(model, settings)
-    if not efforts:
+    if not reasoning_supported_for_model(model, settings):
         raise OpenAIError(
             f"Model '{model}' is not configured with the reasoning capability.",
             status_code=400,
@@ -90,7 +89,7 @@ def validate_reasoning_capabilities(request: ResponseRequest, *, model: str, set
         )
 
     effort = request.reasoning.get("effort") if isinstance(request.reasoning, dict) else None
-    if effort is not None and effort not in efforts:
+    if effort is not None and effort not in reasoning_efforts_for_model(model, settings):
         raise OpenAIError(
             f"Reasoning effort '{effort}' is not supported by model '{model}'.",
             status_code=400,

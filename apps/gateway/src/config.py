@@ -14,7 +14,13 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     default_model: str = "gpt-oss:120b"
     vision_model: str = "moondream:latest"
-    model_capabilities: str = "gpt-oss:120b=text,file-text,reasoning,tools;gpt-oss-120b=text,file-text,reasoning,tools;moondream:latest=text,file-text,vision"
+    model_capabilities: str = (
+        "gpt-oss:120b=text,file-text,reasoning,reasoning-effort-low,"
+        "reasoning-effort-medium,reasoning-effort-high,tools;"
+        "gpt-oss-120b=text,file-text,reasoning,reasoning-effort-low,"
+        "reasoning-effort-medium,reasoning-effort-high,tools;"
+        "moondream:latest=text,file-text,vision"
+    )
     multimodal_download_timeout_seconds: float = 10.0
     multimodal_max_image_bytes: int = 5_000_000
     multimodal_max_file_bytes: int = 2_000_000
