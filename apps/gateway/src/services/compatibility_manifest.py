@@ -414,11 +414,11 @@ FEATURES: list[dict[str, Any]] = [
     {
         "id": "request.reasoning_effort_matrix",
         "category": "request_field",
-        "surface": "reasoning.effort none, minimal, low, medium, high, xhigh",
+        "surface": "reasoning.effort values declared by per-model reasoning-effort-* capabilities",
         "status": "supported_backend_capability",
         "tags": ["reasoning"],
         "benchmark_case": "responses.reasoning.effort_matrix",
-        "notes": "xhigh is accepted only for models configured with reasoning-effort-xhigh and maps to the closest local backend setting where needed.",
+        "notes": "An effort is accepted only when the selected model is configured with the matching reasoning-effort-<value> capability; xhigh maps to the closest local backend setting where needed.",
     },
     {
         "id": "request.context_management",

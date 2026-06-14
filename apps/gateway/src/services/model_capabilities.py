@@ -1,8 +1,7 @@
 from src.config import Settings
 
 
-DEFAULT_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
-XHIGH_REASONING_CAPABILITIES = {"reasoning-xhigh", "reasoning-effort-xhigh"}
+REASONING_EFFORT_CAPABILITY_PREFIX = "reasoning-effort-"
 
 
 def model_capabilities(settings: Settings) -> dict[str, set[str]]:
@@ -30,12 +29,12 @@ def capabilities_for_model(model: str, settings: Settings) -> set[str]:
 
 def reasoning_efforts_for_model(model: str, settings: Settings) -> set[str]:
     capabilities = capabilities_for_model(model, settings)
-    efforts: set[str] = set()
-    if "reasoning" in capabilities:
-        efforts.update(DEFAULT_REASONING_EFFORTS)
-    for capability in capabilities:
-        if capability.startswith("reasoning-effort-"):
-            efforts.add(capability.removeprefix("reasoning-effort-"))
-    if capabilities.intersection(XHIGH_REASONING_CAPABILITIES):
-        efforts.add("xhigh")
-    return efforts
+    return {
+        capability.removeprefix(REASONING_EFFORT_CAPABILITY_PREFIX)
+        for capability in capabilities
+        if capability.startswith(REASONING_EFFORT_CAPABILITY_PREFIX)
+    }
+
+
+def reasoning_supported_for_model(model: str, settings: Settings) -> bool:
+    return "reasoning" in capabilities_for_model(model, settings)

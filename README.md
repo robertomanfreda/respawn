@@ -360,6 +360,11 @@ capabilities when available. Ollama `thinking` output can be tracked as
 reasoning tokens and returned as a local reasoning item. Summary text is
 high-level local metadata and does not expose raw chain-of-thought.
 
+Reasoning effort values are explicit per model. Add `reasoning` for reasoning
+support, then declare each accepted level with `reasoning-effort-<value>`, for
+example `reasoning-effort-low` or `reasoning-effort-high`. Respawn does not infer
+default effort levels from the `reasoning` capability alone.
+
 ## Observability
 
 Respawn emits:
@@ -444,7 +449,7 @@ Important variables:
 | `MODEL_BACKEND` | Backend adapter: `ollama` or `mock`. |
 | `OLLAMA_BASE_URL` | Ollama OpenAI-compatible base URL. |
 | `DEFAULT_MODEL` | Model used when requests omit `model`. |
-| `MODEL_CAPABILITIES` | Per-model capability map for validation. |
+| `MODEL_CAPABILITIES` | Per-model capability map for validation, including explicit `reasoning-effort-*` entries for accepted reasoning levels. |
 | `DATABASE_URL` | SQLAlchemy async database URL. |
 | `AUTH_DISABLED` | Disable bearer-token auth for local development. |
 | `LOCAL_OPENAI_API_KEYS` | Comma-separated `key:tenant` mappings. |
